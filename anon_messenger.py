@@ -19,6 +19,7 @@ from rich.text import Text
 import tempfile
 import shutil
 import requests
+from datetime import datetime
 
 console = Console()
 
@@ -62,7 +63,6 @@ class TorManager:
             self.controller = controller
             self.socks_port = 9050
             self.control_port = 9051
-            console.print("[green]Using existing Tor instance![/green]")
             return True
 
         except:
@@ -79,10 +79,6 @@ class TorManager:
             self.socks_port = self.find_free_port(9050)
             self.control_port = self.find_free_port(self.socks_port + 1)
 
-            console.print(
-                f"[yellow]Starting Tor on ports {self.socks_port}/{self.control_port}...[/yellow]"
-            )
-
             # Create temporary directory for Tor data
             self.tor_data_dir = tempfile.mkdtemp(prefix="anon_msg_tor_")
 
@@ -90,31 +86,26 @@ class TorManager:
                 "SocksPort": str(self.socks_port),
                 "ControlPort": str(self.control_port),
                 "DataDirectory": self.tor_data_dir,
-                "Log": ["warn stdout"],
+                "Log": ["err file /dev/null"],  # Disable all logging
                 "DisableDebuggerAttachment": "0",
+                "SafeLogging": "1",  # Additional security
             }
 
+            # Start Tor without any output
             self.tor_process = stem.process.launch_tor_with_config(
                 config=tor_config,
-                init_msg_handler=lambda line: (
-                    console.print(f"[dim]{line}[/dim]")
-                    if "Bootstrapped 100%" in line
-                    else None
-                ),
+                init_msg_handler=lambda line: None,  # No logging
+                timeout=60,
+                take_ownership=True,
             )
 
             # Connect to controller
             self.controller = Controller.from_port(port=self.control_port)
             self.controller.authenticate()
 
-            console.print("[green]Tor started successfully![/green]")
             return True
 
         except Exception as e:
-            console.print(f"[red]Failed to start Tor: {e}[/red]")
-            console.print(
-                "[yellow]Try stopping any existing Tor processes or restart your system[/yellow]"
-            )
             return False
 
     def create_hidden_service(self, port):
@@ -141,19 +132,12 @@ class TorManager:
                 else:
                     raise Exception("Could not determine onion address")
 
-            console.print(f"[green]Hidden service created: {onion_address}[/green]")
-            console.print("[yellow]Waiting for hidden service to propagate...[/yellow]")
-
-            # Wait a bit for the hidden service to become available
+            # Wait for hidden service to propagate
             time.sleep(5)
-            console.print(
-                "[green]Hidden service should now be accessible worldwide![/green]"
-            )
 
             return onion_address
 
         except Exception as e:
-            console.print(f"[red]Failed to create hidden service: {e}[/red]")
             return None
 
     def cleanup(self):
@@ -168,13 +152,12 @@ class TorManager:
                     self.controller.close()
             if self.tor_process:
                 self.tor_process.kill()
-                console.print("[yellow]Stopped Tor process[/yellow]")
             if hasattr(self, "tor_data_dir") and os.path.exists(self.tor_data_dir):
                 shutil.rmtree(self.tor_data_dir)
             if self.hidden_service_dir and os.path.exists(self.hidden_service_dir):
                 shutil.rmtree(self.hidden_service_dir)
         except Exception as e:
-            console.print(f"[yellow]Cleanup warning: {e}[/yellow]")
+            pass  # Silent cleanup
 
 
 class SecureMessenger:
@@ -197,10 +180,6 @@ class SecureMessenger:
             self.cipher_suite = Fernet(self.key)
             return True
         except Exception as e:
-            console.print(f"[red]Key validation error: {e}[/red]")
-            console.print(
-                f"[yellow]Key length: {len(key_str)}, Expected: ~44 characters[/yellow]"
-            )
             return False
 
     def encrypt_message(self, message):
@@ -230,9 +209,14 @@ class AnonymousServer:
 
     def start(self):
         """Start the anonymous server"""
+        console.print("[yellow]Starting Tor...[/yellow]")
+
         # Start Tor
         if not self.tor_manager.start_tor():
+            console.print("[red]Failed to start Tor[/red]")
             return False
+
+        console.print("[yellow]Creating hidden service...[/yellow]")
 
         # Create socket
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -245,6 +229,7 @@ class AnonymousServer:
             # Create hidden service
             onion_address = self.tor_manager.create_hidden_service(self.port)
             if not onion_address:
+                console.print("[red]Failed to create hidden service[/red]")
                 return False
 
             # Generate encryption key
@@ -255,19 +240,14 @@ class AnonymousServer:
 
             console.print(
                 Panel.fit(
-                    f"[bold green]Anonymous Message Server Started![/bold green]\n\n"
+                    f"[bold green]Server Started[/bold green]\n\n"
                     f"[yellow]Connection String:[/yellow]\n"
                     f"[bold cyan]{connection_string}[/bold cyan]\n\n"
-                    f"[dim]Share this string with others to connect anonymously.\n"
-                    f"Server is running on port {self.port}[/dim]",
-                    title="Server Ready",
-                    width=120,
+                    f"[dim]Share this with others to connect securely[/dim]",
+                    title="Ready",
+                    width=80,
                 )
             )
-
-            # Also print it separately for easy copying
-            console.print(f"\n[yellow]Connection String (copy this):[/yellow]")
-            console.print(f"[bold green]{connection_string}[/bold green]")
 
             self.running = True
 
@@ -334,7 +314,7 @@ class AnonymousClient:
         self.socket = None
         self.connected = False
         self.messenger = SecureMessenger()
-        self.socks_port = 9050  # Default, will be updated if needed
+        self.socks_port = 9050
 
     def connect(self, connection_string):
         """Connect to server using connection string"""
@@ -343,22 +323,13 @@ class AnonymousClient:
             connection_string = connection_string.strip()
             parts = connection_string.split(":")
             if len(parts) != 2:
-                console.print("[red]Invalid connection string format[/red]")
-                console.print(
-                    f"[yellow]Expected format: onion_address:encryption_key[/yellow]"
-                )
-                console.print(f"[yellow]Found {len(parts)} parts: {parts}[/yellow]")
                 return False
 
             onion_address = parts[0].strip()
             encryption_key = parts[1].strip()
 
-            console.print(f"[yellow]Onion address: {onion_address}[/yellow]")
-            console.print(f"[yellow]Key length: {len(encryption_key)}[/yellow]")
-
             # Set encryption key
             if not self.messenger.set_key(encryption_key):
-                console.print("[red]Invalid encryption key[/red]")
                 return False
 
             # Create socket with SOCKS proxy
@@ -368,46 +339,28 @@ class AnonymousClient:
             # Check for existing Tor or find the right SOCKS port
             import socks
 
-            console.print("[yellow]Looking for Tor SOCKS proxy...[/yellow]")
-
             # Try to find working SOCKS port
             socks_ports = [9050, 9051, 9052, 9053, 9054]
             working_port = None
 
             for port in socks_ports:
                 try:
-                    console.print(f"[dim]Trying port {port}...[/dim]")
                     # Test the SOCKS proxy by connecting to it
                     test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     test_sock.settimeout(2)
                     test_sock.connect(("127.0.0.1", port))
                     test_sock.close()
                     working_port = port
-                    console.print(
-                        f"[green]Found working Tor SOCKS on port {port}[/green]"
-                    )
                     break
                 except:
                     continue
 
             if not working_port:
-                console.print("[red]No Tor SOCKS proxy found. Please ensure:[/red]")
-                console.print("[red]1. Tor is installed and running[/red]")
-                console.print(
-                    "[red]2. Run 'python kill_tor.py' then try starting server first[/red]"
-                )
                 return False
 
             self.socks_port = working_port
             socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", self.socks_port)
             socket.socket = socks.socksocket
-
-            console.print(
-                f"[yellow]Connecting to {onion_address} through Tor...[/yellow]"
-            )
-            console.print(
-                "[dim]This may take 10-30 seconds for hidden services...[/dim]"
-            )
 
             # Connect to hidden service with multiple retries
             max_retries = 3
@@ -416,58 +369,25 @@ class AnonymousClient:
             for attempt in range(max_retries):
                 try:
                     if attempt > 0:
-                        console.print(
-                            f"[yellow]Retry attempt {attempt + 1}/{max_retries}...[/yellow]"
-                        )
                         time.sleep(retry_delay)
 
                     self.socket = socks.socksocket()
-                    self.socket.settimeout(45)  # 45 second timeout per attempt
-
-                    console.print(
-                        f"[dim]Attempt {attempt + 1}: Building Tor circuit...[/dim]"
-                    )
+                    self.socket.settimeout(45)
                     self.socket.connect((onion_address, 8080))
-
-                    # If we get here, connection succeeded
                     break
 
                 except socket.timeout:
-                    console.print(f"[yellow]Attempt {attempt + 1} timed out[/yellow]")
                     if self.socket:
                         self.socket.close()
                     if attempt == max_retries - 1:
-                        console.print("[red]All connection attempts failed.[/red]")
-                        console.print(
-                            "[yellow]Hidden service troubleshooting:[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]1. Server may still be starting up (wait 2-3 minutes)[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]2. Server might be behind a firewall[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]3. Try restarting both server and client[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]4. Check if onion address is correct[/yellow]"
-                        )
                         return False
                 except Exception as conn_err:
-                    console.print(
-                        f"[red]Attempt {attempt + 1} failed: {conn_err}[/red]"
-                    )
                     if self.socket:
                         self.socket.close()
                     if attempt == max_retries - 1:
-                        console.print(
-                            "[red]Could not establish connection to hidden service.[/red]"
-                        )
                         return False
 
             self.connected = True
-            console.print("[green]Connected anonymously![/green]")
 
             # Start receiving messages
             receive_thread = threading.Thread(target=self.receive_messages)
@@ -477,7 +397,6 @@ class AnonymousClient:
             return True
 
         except Exception as e:
-            console.print(f"[red]Connection failed: {e}[/red]")
             return False
 
     def receive_messages(self):
@@ -492,7 +411,10 @@ class AnonymousClient:
                 decrypted_msg = self.messenger.decrypt_message(encrypted_msg)
 
                 if decrypted_msg:
-                    console.print(f"[blue]> {decrypted_msg}[/blue]")
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    console.print(
+                        f"[dim]{timestamp}[/dim] [blue]>[/blue] {decrypted_msg}"
+                    )
 
             except:
                 break
@@ -506,11 +428,51 @@ class AnonymousClient:
             encrypted_msg = self.messenger.encrypt_message(message)
             if encrypted_msg:
                 self.socket.send(encrypted_msg.encode())
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                console.print(f"[dim]{timestamp}[/dim] [cyan]You:[/cyan] {message}")
                 return True
         except:
             pass
 
         return False
+
+    def input_handler(self):
+        """Handle user input in a separate thread"""
+        while self.connected:
+            try:
+                message = input()
+                if message.lower() in ["quit", "exit", "/quit", "/exit"]:
+                    self.connected = False
+                    break
+
+                if message.strip():
+                    self.send_message(message)
+            except (KeyboardInterrupt, EOFError):
+                self.connected = False
+                break
+
+    def start_chat_ui(self):
+        """Start the interactive chat UI"""
+        # Clear screen and show header
+        console.clear()
+        console.print(
+            Panel.fit(
+                "[bold green]Anonymous Chat Connected[/bold green]\n"
+                "[dim]Type messages and press Enter. Type 'quit' to exit.[/dim]",
+                title="Secure Chat",
+            )
+        )
+
+        # Start input handler thread
+        input_thread = threading.Thread(target=self.input_handler)
+        input_thread.daemon = True
+        input_thread.start()
+
+        try:
+            while self.connected:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            self.connected = False
 
     def disconnect(self):
         """Disconnect from server"""
@@ -528,55 +490,37 @@ def main():
 
     args = parser.parse_args()
 
-    console.print(
-        Panel.fit(
-            "[bold]Anonymous Terminal Messenger[/bold]\n"
-            "[dim]Fully anonymous messaging through Tor[/dim]",
-            title="AnonMsg",
-        )
-    )
-
     if args.server:
         # Server mode
         server = AnonymousServer()
         try:
             if server.start():
-                console.print("\n[yellow]Press Ctrl+C to stop server[/yellow]")
                 while True:
                     time.sleep(1)
         except KeyboardInterrupt:
-            console.print("\n[yellow]Shutting down server...[/yellow]")
+            pass
         finally:
             server.stop()
 
     elif args.client:
         # Client mode
         client = AnonymousClient()
-
         if client.connect(args.client):
-            console.print(
-                "\n[green]You can now send messages. Type 'quit' to exit.[/green]"
-            )
-
-            try:
-                while True:
-                    message = Prompt.ask("[bold]Message")
-                    if message.lower() == "quit":
-                        break
-
-                    if not client.send_message(message):
-                        console.print("[red]Failed to send message[/red]")
-                        break
-
-            except KeyboardInterrupt:
-                pass
-            finally:
-                client.disconnect()
+            client.start_chat_ui()
+        client.disconnect()
 
     else:
         # Interactive mode
+        console.print(
+            Panel.fit(
+                "[bold]Anonymous Terminal Messenger[/bold]\n"
+                "[dim]Secure messaging through Tor[/dim]",
+                title="AnonMsg",
+            )
+        )
+
         console.print("\n[yellow]Choose mode:[/yellow]")
-        console.print("1. Start Server (others connect to you)")
+        console.print("1. Start Server")
         console.print("2. Connect to Server")
 
         choice = Prompt.ask("Select", choices=["1", "2"])
@@ -586,39 +530,21 @@ def main():
             server = AnonymousServer()
             try:
                 if server.start():
-                    console.print("\n[yellow]Press Ctrl+C to stop server[/yellow]")
+                    console.print("\n[yellow]Press Ctrl+C to stop[/yellow]")
                     while True:
                         time.sleep(1)
             except KeyboardInterrupt:
-                console.print("\n[yellow]Shutting down server...[/yellow]")
+                pass
             finally:
                 server.stop()
 
         else:
             # Connect as client
             connection_string = Prompt.ask("[yellow]Enter connection string[/yellow]")
-
             client = AnonymousClient()
-
             if client.connect(connection_string):
-                console.print(
-                    "\n[green]You can now send messages. Type 'quit' to exit.[/green]"
-                )
-
-                try:
-                    while True:
-                        message = Prompt.ask("[bold]Message")
-                        if message.lower() == "quit":
-                            break
-
-                        if not client.send_message(message):
-                            console.print("[red]Failed to send message[/red]")
-                            break
-
-                except KeyboardInterrupt:
-                    pass
-                finally:
-                    client.disconnect()
+                client.start_chat_ui()
+            client.disconnect()
 
 
 if __name__ == "__main__":
