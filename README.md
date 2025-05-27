@@ -158,6 +158,44 @@ python anon_messenger.py --client "onion_address:encryption_key"
 -   **Text Only**: No file sharing
 -   **Basic UI**: Terminal-based interface
 
+## 🔧 Troubleshooting
+
+### Connection Issues
+
+If clients can't connect from different networks:
+
+1. **Wait for Propagation**: Hidden services take 10-30 seconds to propagate
+2. **Test Connectivity**:
+    ```bash
+    python test_connection.py your_onion_address.onion
+    ```
+3. **Restart Components**:
+    ```bash
+    python kill_tor.py  # Kill existing Tor processes
+    # Then restart server
+    ```
+
+### Server Won't Start
+
+```bash
+# Kill conflicting Tor processes
+python kill_tor.py
+
+# Try different approach
+brew services stop tor  # On macOS
+sudo service tor stop   # On Linux
+
+# Then start the server
+python anon_messenger.py --server
+```
+
+### Client Connection Timeouts
+
+-   **Wait longer**: Hidden services can take 2-3 minutes to be fully accessible
+-   **Check server**: Ensure server is still running and displays "Server Ready"
+-   **Network**: Try from a different network/device to test
+-   **Tor status**: Ensure Tor is running on client machine
+
 ## 🔄 Contributing
 
 This is a minimal PoC. Contributions welcome for:

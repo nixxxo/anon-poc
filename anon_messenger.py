@@ -8,7 +8,7 @@ import base64
 import os
 import sys
 import argparse
-from stem.control import Controller
+from stem.control import Controller  # type: ignore
 from stem import Signal
 import stem.process
 from cryptography.fernet import Fernet
@@ -142,6 +142,14 @@ class TorManager:
                     raise Exception("Could not determine onion address")
 
             console.print(f"[green]Hidden service created: {onion_address}[/green]")
+            console.print("[yellow]Waiting for hidden service to propagate...[/yellow]")
+
+            # Wait a bit for the hidden service to become available
+            time.sleep(5)
+            console.print(
+                "[green]Hidden service should now be accessible worldwide![/green]"
+            )
+
             return onion_address
 
         except Exception as e:
@@ -190,7 +198,9 @@ class SecureMessenger:
             return True
         except Exception as e:
             console.print(f"[red]Key validation error: {e}[/red]")
-            console.print(f"[yellow]Key length: {len(key_str)}, Expected: ~44 characters[/yellow]")
+            console.print(
+                f"[yellow]Key length: {len(key_str)}, Expected: ~44 characters[/yellow]"
+            )
             return False
 
     def encrypt_message(self, message):
@@ -334,13 +344,15 @@ class AnonymousClient:
             parts = connection_string.split(":")
             if len(parts) != 2:
                 console.print("[red]Invalid connection string format[/red]")
-                console.print(f"[yellow]Expected format: onion_address:encryption_key[/yellow]")
+                console.print(
+                    f"[yellow]Expected format: onion_address:encryption_key[/yellow]"
+                )
                 console.print(f"[yellow]Found {len(parts)} parts: {parts}[/yellow]")
                 return False
 
             onion_address = parts[0].strip()
             encryption_key = parts[1].strip()
-            
+
             console.print(f"[yellow]Onion address: {onion_address}[/yellow]")
             console.print(f"[yellow]Key length: {len(encryption_key)}[/yellow]")
 
@@ -356,24 +368,33 @@ class AnonymousClient:
             # Check for existing Tor or find the right SOCKS port
             import socks
 
+            console.print("[yellow]Looking for Tor SOCKS proxy...[/yellow]")
+
             # Try to find working SOCKS port
             socks_ports = [9050, 9051, 9052, 9053, 9054]
             working_port = None
 
             for port in socks_ports:
                 try:
-                    socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", port)
-                    test_socket = socks.socksocket()
-                    test_socket.settimeout(5)
-                    # If this doesn't throw an exception, the port works
+                    console.print(f"[dim]Trying port {port}...[/dim]")
+                    # Test the SOCKS proxy by connecting to it
+                    test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    test_sock.settimeout(2)
+                    test_sock.connect(("127.0.0.1", port))
+                    test_sock.close()
                     working_port = port
+                    console.print(
+                        f"[green]Found working Tor SOCKS on port {port}[/green]"
+                    )
                     break
                 except:
                     continue
 
             if not working_port:
+                console.print("[red]No Tor SOCKS proxy found. Please ensure:[/red]")
+                console.print("[red]1. Tor is installed and running[/red]")
                 console.print(
-                    "[red]No Tor SOCKS proxy found. Make sure Tor is running.[/red]"
+                    "[red]2. Run 'python kill_tor.py' then try starting server first[/red]"
                 )
                 return False
 
@@ -382,12 +403,68 @@ class AnonymousClient:
             socket.socket = socks.socksocket
 
             console.print(
-                f"[yellow]Connecting through Tor (port {self.socks_port})...[/yellow]"
+                f"[yellow]Connecting to {onion_address} through Tor...[/yellow]"
+            )
+            console.print(
+                "[dim]This may take 10-30 seconds for hidden services...[/dim]"
             )
 
-            # Connect to hidden service
-            self.socket = socks.socksocket()
-            self.socket.connect((onion_address, 8080))
+            # Connect to hidden service with multiple retries
+            max_retries = 3
+            retry_delay = 10
+
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        console.print(
+                            f"[yellow]Retry attempt {attempt + 1}/{max_retries}...[/yellow]"
+                        )
+                        time.sleep(retry_delay)
+
+                    self.socket = socks.socksocket()
+                    self.socket.settimeout(45)  # 45 second timeout per attempt
+
+                    console.print(
+                        f"[dim]Attempt {attempt + 1}: Building Tor circuit...[/dim]"
+                    )
+                    self.socket.connect((onion_address, 8080))
+
+                    # If we get here, connection succeeded
+                    break
+
+                except socket.timeout:
+                    console.print(f"[yellow]Attempt {attempt + 1} timed out[/yellow]")
+                    if self.socket:
+                        self.socket.close()
+                    if attempt == max_retries - 1:
+                        console.print("[red]All connection attempts failed.[/red]")
+                        console.print(
+                            "[yellow]Hidden service troubleshooting:[/yellow]"
+                        )
+                        console.print(
+                            "[yellow]1. Server may still be starting up (wait 2-3 minutes)[/yellow]"
+                        )
+                        console.print(
+                            "[yellow]2. Server might be behind a firewall[/yellow]"
+                        )
+                        console.print(
+                            "[yellow]3. Try restarting both server and client[/yellow]"
+                        )
+                        console.print(
+                            "[yellow]4. Check if onion address is correct[/yellow]"
+                        )
+                        return False
+                except Exception as conn_err:
+                    console.print(
+                        f"[red]Attempt {attempt + 1} failed: {conn_err}[/red]"
+                    )
+                    if self.socket:
+                        self.socket.close()
+                    if attempt == max_retries - 1:
+                        console.print(
+                            "[red]Could not establish connection to hidden service.[/red]"
+                        )
+                        return False
 
             self.connected = True
             console.print("[green]Connected anonymously![/green]")
