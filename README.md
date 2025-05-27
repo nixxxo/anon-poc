@@ -73,11 +73,16 @@ sudo apt-get install tor
 # macOS:
 brew install tor
 
-# Install Python dependencies
+# Install Python dependencies for messenger
 pip install -r requirements.txt
+
+# Install additional dependencies for security testing
+pip install -r pentest_requirements.txt
 ```
 
 ### Required Python Packages
+
+**For Messenger:**
 
 ```
 stem>=1.8.0
@@ -85,6 +90,17 @@ cryptography>=3.0.0
 rich>=10.0.0
 PySocks>=1.7.0
 requests>=2.25.0
+```
+
+**For Security Testing:**
+
+```
+scapy>=2.4.0
+matplotlib>=3.0.0
+seaborn>=0.11.0
+numpy>=1.19.0
+pandas>=1.3.0
+psutil>=5.8.0
 ```
 
 ### Usage
@@ -121,37 +137,297 @@ python anon_messenger.py --client "onion_address:encryption_key"
 -   Type `quit`, `exit`, `/quit`, or `/exit` to disconnect
 -   Ctrl+C to force exit
 
-## Recommended Improvements
+## Security Testing & Analysis
 
-### Security Enhancements
+The project includes a comprehensive penetration testing tool (`pentest_anon_messenger.py`) that demonstrates the security and anonymity of the messenger by analyzing what data can and cannot be observed through various network analysis techniques.
 
-1. **Perfect Forward Secrecy**: Implement full ECDH key exchange
-2. **Post-Quantum Cryptography**: Add quantum-resistant algorithms
-3. **Message Authentication**: Add HMAC for message integrity
-4. **Key Rotation**: Automatic periodic key rotation
-5. **Secure Key Exchange**: Implement secure initial key exchange protocol
+### Purpose of Security Testing
 
-### Anonymity Improvements
+The penetration testing tool serves as proof-of-concept to demonstrate:
 
-1. **Bridge Support**: Add Tor bridge configuration for censored networks
-2. **Pluggable Transports**: Support for obfs4 and other transports
-3. **Guard Node Selection**: Custom guard node configuration
-4. **Exit Node Avoidance**: Ensure all traffic stays within Tor network
+-   What network traffic is visible to observers
+-   How the messenger's security measures protect against common attacks
+-   Traffic analysis resistance and correlation attack prevention
+-   Tor infrastructure security assessment
 
-### Operational Security
+### Running Security Tests
 
-1. **Sandboxing**: Run in isolated containers or VMs
-2. **Memory Protection**: Enhanced memory protection mechanisms
-3. **Secure Boot**: Verify system integrity
-4. **Network Isolation**: Prevent non-Tor network access
+#### Prerequisites for Testing
 
-### Usability & Features
+The tool requires root/administrator privileges for packet capture:
 
-1. **Group Chat**: Multi-user chat rooms
-2. **File Transfer**: Secure file sharing capabilities
-3. **Message History**: Encrypted local message storage
-4. **User Authentication**: Optional user verification
-5. **Mobile Support**: Cross-platform compatibility
+```bash
+# Linux/macOS - Install system dependencies
+sudo apt-get install python3-dev libpcap-dev  # Ubuntu/Debian
+brew install libpcap  # macOS
+```
+
+#### Basic Security Testing
+
+```bash
+# Run comprehensive security test (60 seconds)
+sudo python3 pentest_anon_messenger.py
+
+# Quick test (30 seconds)
+sudo python3 pentest_anon_messenger.py --quick
+
+# Custom duration
+sudo python3 pentest_anon_messenger.py --duration 120
+
+# Specify network interface
+sudo python3 pentest_anon_messenger.py --interface eth0
+
+# Generate detailed report and visualizations
+sudo python3 pentest_anon_messenger.py --report security_analysis.json --plots
+```
+
+#### Testing Workflow
+
+1. **Start the Anonymous Messenger** (in separate terminal):
+
+    ```bash
+    python3 anon_messenger.py --server
+    ```
+
+2. **Run the Pentest Tool** (requires root):
+
+    ```bash
+    sudo python3 pentest_anon_messenger.py --duration 60 --plots
+    ```
+
+3. **Connect Clients** (in separate terminals):
+
+    ```bash
+    python3 anon_messenger.py --client "onion_address:key"
+    ```
+
+4. **Send Messages** to generate traffic for analysis
+
+5. **Review Results** in the pentest tool output and generated plots
+
+### Security Analysis Features
+
+#### Network Traffic Analysis
+
+-   **Packet Capture**: Real-time network packet interception
+-   **Traffic Pattern Analysis**: Timing, size, and flow analysis
+-   **Tor Traffic Detection**: Identification of Tor-related communications
+-   **Connection Mapping**: Analysis of network connections and patterns
+
+#### Security Assessment
+
+-   **Tor Infrastructure Analysis**: Detection and configuration assessment
+-   **Correlation Attack Simulation**: Traffic correlation vulnerability testing
+-   **Timing Analysis**: Detection of regular patterns that could aid attacks
+-   **Padding Detection**: Verification of message padding effectiveness
+
+#### Reporting
+
+-   **Real-time Display**: Live security analysis with Rich UI
+-   **Security Scoring**: Numerical security assessment (0-100)
+-   **Detailed Reports**: JSON export of all findings
+-   **Recommendations**: Specific security improvement suggestions
+
+### Security Visualizations
+
+The pentest tool generates three comprehensive security visualizations that provide critical insights for research into anonymous messaging security:
+
+#### 1. Traffic Visibility Analysis
+
+![Traffic Visibility Analysis](security_plots/traffic_visibility_analysis.png)
+
+**What it shows:**
+
+-   **Packet Size Distribution**: Color-coded fingerprinting risk analysis
+-   **Timing Pattern Analysis**: Inter-packet timing with correlation risk assessment
+-   **Traffic Volume Timeline**: Burst detection and volume pattern analysis
+-   **Tor Coverage Analysis**: Percentage of traffic protected by anonymization
+-   **Comprehensive Summary**: Metrics including entropy, metadata leakage, and fingerprinting risk
+
+**Research Value:** Quantifies what network attackers can observe and demonstrates effectiveness of anonymity protections.
+
+#### 2. Security Effectiveness Dashboard
+
+![Security Effectiveness Dashboard](security_plots/security_effectiveness_dashboard.png)
+
+**What it shows:**
+
+-   **Overall Security Score**: 0-100 gauge with letter grade (A-F)
+-   **Component Breakdown**: Tor Infrastructure, Traffic Analysis, Correlation Resistance
+-   **Anonymity Radar**: Multi-dimensional security assessment across 6 categories
+-   **Protection vs Attack Success**: Defense effectiveness against specific attack types
+-   **Recommendations**: Prioritized security improvements with urgency levels
+
+**Research Value:** Comprehensive assessment of security measures effectiveness and overall protection quality.
+
+#### 3. Attack Surface Risk Matrix
+
+![Attack Surface Risk Matrix](security_plots/attack_surface_risk_matrix.png)
+
+**What it shows:**
+
+-   **Risk Matrix**: Likelihood vs Impact analysis for different attack vectors
+-   **Attack Timeline**: Success probability over time for various attack scenarios
+-   **Defense Analysis**: Theoretical vs actual implementation effectiveness
+-   **Adversary Assessment**: Protection levels against different threat actors
+-   **Vulnerability Heatmap**: Systematic assessment across network layers
+-   **Mitigation Roadmap**: Priority-based action items for security improvements
+
+**Research Value:** Comprehensive threat modeling and vulnerability assessment with actionable mitigation strategies.
+
+### Analysis Phases
+
+#### Phase 1: Tor Infrastructure Analysis
+
+**What it checks:**
+
+-   Tor process detection and configuration
+-   Port analysis (SOCKS, Control ports)
+-   Tor connectivity testing
+-   Security configuration assessment
+
+**Expected Results:**
+
+-   ✓ Tor processes running
+-   ✓ SOCKS proxy functional
+-   ✓ Secure configuration detected
+
+#### Phase 2: Network Traffic Analysis
+
+**What it captures:**
+
+-   All TCP packets on specified interface
+-   Packet timing and size patterns
+-   Connection establishment and teardown
+-   Tor-specific traffic identification
+
+**What it analyzes:**
+
+-   Traffic volume and patterns
+-   Message size distribution
+-   Timing regularity
+-   Padding effectiveness
+
+#### Phase 3: Security Assessment
+
+**Scoring Criteria:**
+
+-   **Tor Infrastructure (30 points)**: Proper Tor setup and connectivity
+-   **Traffic Analysis (40 points)**: Padding, timing obfuscation, Tor usage
+-   **Correlation Risk (30 points)**: Resistance to traffic correlation attacks
+
+**Grade Scale:**
+
+-   A (90-100): Excellent security
+-   B (80-89): Good security
+-   C (70-79): Adequate security
+-   D (60-69): Poor security
+-   F (0-59): Inadequate security
+
+### What the Tool Demonstrates
+
+#### Observable Data (What Attackers Can See)
+
+1. **Network Metadata:**
+
+    - Connection timestamps
+    - Packet sizes and timing
+    - Traffic volume
+    - Tor usage (but not destinations)
+
+2. **Traffic Patterns:**
+    - Communication frequency
+    - Burst patterns
+    - Connection durations
+
+#### Protected Data (What Attackers Cannot See)
+
+1. **Message Content:**
+
+    - All messages are encrypted end-to-end
+    - No plaintext content visible
+
+2. **Real IP Addresses:**
+
+    - All traffic routed through Tor
+    - Only localhost connections visible
+
+3. **Message Recipients:**
+
+    - Hidden service addresses not exposed
+    - No correlation between users
+
+4. **Message Sizes:**
+    - Padding obscures actual message lengths
+    - Fixed-size packets prevent size analysis
+
+### Security Measures Demonstrated
+
+#### Traffic Analysis Protection
+
+-   **Padding Detection**: Verifies messages are padded to fixed sizes (512B, 1KB, 2KB, 4KB)
+-   **Timing Obfuscation**: Detects random delays between messages (0.5-3 seconds)
+-   **Dummy Traffic**: Identifies fake messages sent periodically
+
+#### Anonymity Protection
+
+-   **Tor Integration**: Verifies all traffic routes through Tor network
+-   **Circuit Management**: Detects automatic circuit refresh (every 5 minutes)
+
+#### Correlation Attack Resistance
+
+-   **Pattern Analysis**: Tests for regular timing patterns
+-   **Traffic Bursts**: Identifies bursts that could aid correlation
+-   **Risk Assessment**: Overall correlation risk (LOW/MEDIUM/HIGH)
+
+### Interpreting Results
+
+#### Good Security Indicators
+
+-   ✓ Tor processes running and configured securely
+-   ✓ Padding detected in traffic analysis
+-   ✓ No regular timing patterns
+-   ✓ Low correlation attack risk
+-   ✓ Security score 80+ (Grade B or better)
+
+#### Security Concerns
+
+-   ✗ Regular timing patterns detected
+-   ✗ No padding in messages
+-   ✗ High correlation attack risk
+-   ✗ Tor connectivity issues
+-   ✗ Security score below 70 (Grade C or worse)
+
+### Troubleshooting Security Tests
+
+#### Common Issues
+
+**Permission Denied:**
+
+```bash
+# Solution: Run with sudo
+sudo python3 pentest_anon_messenger.py
+```
+
+**No Packets Captured:**
+
+```bash
+# Check interface name
+ip addr show  # Linux
+ifconfig      # macOS
+# Use correct interface
+sudo python3 pentest_anon_messenger.py --interface eth0
+```
+
+**Tor Not Detected:**
+
+```bash
+# Start Tor manually
+tor &
+# Or use system Tor
+sudo systemctl start tor  # Linux
+brew services start tor   # macOS
+```
 
 ## Vulnerability Assessment
 
@@ -242,6 +518,38 @@ This system assumes:
 -   Users follow operational security practices
 -   Cryptographic libraries are implemented correctly
 -   No global passive adversary with unlimited resources
+
+## Recommended Improvements
+
+### Security Enhancements
+
+1. **Perfect Forward Secrecy**: Implement full ECDH key exchange
+2. **Post-Quantum Cryptography**: Add quantum-resistant algorithms
+3. **Message Authentication**: Add HMAC for message integrity
+4. **Key Rotation**: Automatic periodic key rotation
+5. **Secure Key Exchange**: Implement secure initial key exchange protocol
+
+### Anonymity Improvements
+
+1. **Bridge Support**: Add Tor bridge configuration for censored networks
+2. **Pluggable Transports**: Support for obfs4 and other transports
+3. **Guard Node Selection**: Custom guard node configuration
+4. **Exit Node Avoidance**: Ensure all traffic stays within Tor network
+
+### Operational Security
+
+1. **Sandboxing**: Run in isolated containers or VMs
+2. **Memory Protection**: Enhanced memory protection mechanisms
+3. **Secure Boot**: Verify system integrity
+4. **Network Isolation**: Prevent non-Tor network access
+
+### Usability & Features
+
+1. **Group Chat**: Multi-user chat rooms
+2. **File Transfer**: Secure file sharing capabilities
+3. **Message History**: Encrypted local message storage
+4. **User Authentication**: Optional user verification
+5. **Mobile Support**: Cross-platform compatibility
 
 ## Technical Implementation Details
 
@@ -492,6 +800,28 @@ CIRCUIT_REFRESH_INTERVAL = 300  # Refresh Tor circuit every 5 minutes
 3. **Input Thread**: User input processing
 4. **Dummy Traffic Thread**: Periodic fake message generation
 5. **Circuit Refresh Thread**: Tor circuit renewal
+
+## Research Applications
+
+### Academic Research
+
+-   **Traffic Analysis Studies**: Use visibility analysis to quantify what attackers can observe
+-   **Anonymity Metrics**: Radar charts provide multi-dimensional anonymity assessment
+-   **Threat Modeling**: Risk matrices enable systematic threat analysis
+-   **Defense Evaluation**: Compare theoretical vs actual protection effectiveness
+
+### Security Assessment
+
+-   **Penetration Testing**: Comprehensive vulnerability identification
+-   **Risk Management**: Prioritized mitigation roadmaps
+-   **Compliance**: Quantified security scoring for audits
+-   **Monitoring**: Track security improvements over time
+
+### System Development
+
+-   **Design Validation**: Verify anonymity protections work as intended
+-   **Performance Tuning**: Balance security vs performance trade-offs
+-   **Feature Prioritization**: Focus development on highest-impact security improvements
 
 ## Research & Development
 

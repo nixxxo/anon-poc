@@ -54,3 +54,5 @@ Thumbs.db
 *.pem
 private_key
 onion_service_* 
+
+security_analysis.json
