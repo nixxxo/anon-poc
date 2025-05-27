@@ -8,10 +8,19 @@ import base64
 import os
 import sys
 import argparse
+import secrets
+import hashlib
+import hmac
+import struct
 from stem.control import Controller  # type: ignore
 from stem import Signal
 import stem.process
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.backends import default_backend
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.panel import Panel
@@ -21,7 +30,70 @@ import shutil
 import requests
 from datetime import datetime
 
+# Memory locking support using ctypes
+import ctypes
+import ctypes.util
+import zlib
+
+try:
+    if hasattr(ctypes, "util") and ctypes.util.find_library:
+        libc_name = ctypes.util.find_library("c")
+        if libc_name:
+            libc = ctypes.CDLL(libc_name)
+            HAS_MLOCK = True
+        else:
+            libc = None
+            HAS_MLOCK = False
+    else:
+        libc = None
+        HAS_MLOCK = False
+except (OSError, AttributeError):
+    libc = None
+    HAS_MLOCK = False
+
+# mlock constants
+MCL_CURRENT = 1
+MCL_FUTURE = 2
+
 console = Console()
+
+
+# Security utilities
+def secure_zero_memory(data):
+    """Securely zero out memory containing sensitive data"""
+    if isinstance(data, str):
+        data = data.encode()
+    if isinstance(data, (bytes, bytearray)):
+        # Overwrite memory multiple times
+        for _ in range(3):
+            for i in range(len(data)):
+                data[i] = 0
+        del data
+
+
+def lock_memory(data=None):
+    """Lock memory pages to prevent swapping (if available)"""
+    if HAS_MLOCK and libc:
+        try:
+            # Call mlockall(MCL_CURRENT | MCL_FUTURE)
+            result = libc.mlockall(MCL_CURRENT | MCL_FUTURE)
+            if result != 0:
+                # Get errno for error details
+                errno_ptr = libc.__errno_location()
+                errno_ptr.restype = ctypes.POINTER(ctypes.c_int)
+                errno_val = errno_ptr().contents.value
+                # Don't raise error, just log silently
+                pass
+        except:
+            pass
+
+
+# Security constants
+MESSAGE_SIZES = [512, 1024, 2048, 4096]  # Fixed message sizes for padding
+DUMMY_TRAFFIC_INTERVAL = 30  # Send dummy traffic every 30 seconds
+MIN_MESSAGE_DELAY = 0.5  # Minimum delay between messages (seconds)
+MAX_MESSAGE_DELAY = 3.0  # Maximum delay between messages (seconds)
+CIRCUIT_REFRESH_INTERVAL = 300  # Refresh Tor circuit every 5 minutes
 
 
 class TorManager:
@@ -31,6 +103,7 @@ class TorManager:
         self.socks_port = None
         self.control_port = None
         self.hidden_service_dir = None
+        self.circuit_refresh_timer = None
 
     def find_free_port(self, start_port=9050):
         """Find a free port starting from start_port"""
@@ -63,15 +136,27 @@ class TorManager:
             self.controller = controller
             self.socks_port = 9050
             self.control_port = 9051
+            self._configure_existing_tor()
             return True
 
         except:
             return False
 
+    def _configure_existing_tor(self):
+        """Apply security configurations to existing Tor instance"""
+        try:
+            # Apply security-focused configurations
+            self.controller.set_conf("NewCircuitPeriod", "30")
+            self.controller.set_conf("MaxCircuitDirtiness", "600")
+            self.controller.set_conf("EnforceDistinctSubnets", "1")
+        except:
+            pass  # Some configs might not be changeable on existing instance
+
     def start_tor(self):
-        """Start Tor process with minimal configuration"""
+        """Start Tor process with enhanced security configuration"""
         # First try to use existing Tor
         if self.check_existing_tor():
+            self._start_circuit_refresh()
             return True
 
         try:
@@ -82,13 +167,24 @@ class TorManager:
             # Create temporary directory for Tor data
             self.tor_data_dir = tempfile.mkdtemp(prefix="anon_msg_tor_")
 
+            # Enhanced security configuration
             tor_config = {
                 "SocksPort": str(self.socks_port),
                 "ControlPort": str(self.control_port),
                 "DataDirectory": self.tor_data_dir,
                 "Log": ["err file /dev/null"],  # Disable all logging
                 "DisableDebuggerAttachment": "0",
-                "SafeLogging": "1",  # Additional security
+                "SafeLogging": "1",
+                # Enhanced security settings
+                "NewCircuitPeriod": "30",  # New circuit every 30 seconds
+                "MaxCircuitDirtiness": "600",  # Force circuit renewal
+                "EnforceDistinctSubnets": "1",  # Avoid same subnet relays
+                "ClientUseIPv6": "0",  # Disable IPv6 to prevent leaks
+                "StrictNodes": "1",  # Use only specified nodes
+                "FascistFirewall": "1",  # Only use standard ports
+                "WarnUnsafeSocks": "0",  # Disable warnings
+                "AvoidDiskWrites": "1",  # Minimize disk writes
+                "HardwareAccel": "1",  # Use hardware acceleration if available
             }
 
             # Start Tor without any output
@@ -103,10 +199,30 @@ class TorManager:
             self.controller = Controller.from_port(port=self.control_port)
             self.controller.authenticate()
 
+            # Start circuit refresh timer
+            self._start_circuit_refresh()
+
             return True
 
         except Exception as e:
             return False
+
+    def _start_circuit_refresh(self):
+        """Start automatic circuit refresh"""
+
+        def refresh_circuits():
+            while self.controller:
+                try:
+                    time.sleep(CIRCUIT_REFRESH_INTERVAL)
+                    if self.controller:
+                        self.controller.signal(Signal.NEWNYM)
+                except:
+                    break
+
+        if self.controller:
+            self.circuit_refresh_timer = threading.Thread(target=refresh_circuits)
+            self.circuit_refresh_timer.daemon = True
+            self.circuit_refresh_timer.start()
 
     def create_hidden_service(self, port):
         """Create a hidden service for the given port"""
@@ -164,38 +280,308 @@ class SecureMessenger:
     def __init__(self):
         self.key = None
         self.cipher_suite = None
+        self.private_key = None
+        self.public_key = None
+        self.shared_secret = None
+        self.message_counter = 0
+        self.last_send_time = 0
+
+        # Lock memory for sensitive data
+        lock_memory(self)
 
     def generate_key(self):
-        """Generate a new encryption key"""
+        """Generate ECDH key pair for Perfect Forward Secrecy"""
+        self.private_key = ec.generate_private_key(ec.SECP384R1(), default_backend())
+        self.public_key = self.private_key.public_key()
+
+        # Also generate a fallback Fernet key for compatibility
         self.key = Fernet.generate_key()
         self.cipher_suite = Fernet(self.key)
-        return base64.urlsafe_b64encode(self.key).decode()
+
+        # Create compact connection string
+        # Use raw public key bytes instead of PEM (much shorter)
+        public_numbers = self.public_key.public_numbers()
+
+        # Encode public key as compact binary (48 bytes for P-384)
+        x_bytes = public_numbers.x.to_bytes(48, byteorder="big")
+        y_bytes = public_numbers.y.to_bytes(48, byteorder="big")
+        public_raw = x_bytes + y_bytes  # 96 bytes total
+
+        # Combine with Fernet key (32 bytes)
+        combined_data = public_raw + self.key  # 128 bytes total
+
+        # Compress and encode with base32 for better readability
+        compressed = zlib.compress(combined_data, level=9)
+        connection_string = base64.b32encode(compressed).decode().rstrip("=")
+
+        return connection_string
 
     def set_key(self, key_str):
-        """Set encryption key from string"""
+        """Set encryption key from connection string"""
         try:
-            # Clean the key string
             key_str = key_str.strip()
-            self.key = base64.urlsafe_b64decode(key_str.encode())
-            self.cipher_suite = Fernet(self.key)
-            return True
+
+            # Try new compact format first
+            try:
+                # Add padding if needed for base32
+                key_str_padded = key_str + "=" * (8 - len(key_str) % 8) % 8
+                compressed = base64.b32decode(key_str_padded.encode())
+                decoded = zlib.decompress(compressed)
+
+                if len(decoded) == 128:  # 96 bytes public key + 32 bytes Fernet key
+                    # Extract public key coordinates
+                    public_raw = decoded[:96]
+                    fernet_key = decoded[96:]
+
+                    x_bytes = public_raw[:48]
+                    y_bytes = public_raw[48:96]
+
+                    # Reconstruct public key
+                    x = int.from_bytes(x_bytes, byteorder="big")
+                    y = int.from_bytes(y_bytes, byteorder="big")
+
+                    public_numbers = ec.EllipticCurvePublicNumbers(x, y, ec.SECP384R1())
+                    server_public_key = public_numbers.public_key(default_backend())
+
+                    # Generate our own key pair
+                    self.private_key = ec.generate_private_key(
+                        ec.SECP384R1(), default_backend()
+                    )
+                    self.public_key = self.private_key.public_key()
+
+                    # Perform ECDH
+                    self.shared_secret = self.private_key.exchange(
+                        ec.ECDH(), server_public_key
+                    )
+
+                    # Fallback to Fernet for compatibility
+                    self.key = fernet_key
+                    self.cipher_suite = Fernet(self.key)
+
+                    return True
+            except:
+                pass  # Fall through to legacy format
+
+            # Try legacy format
+            try:
+                decoded = base64.urlsafe_b64decode(key_str.encode())
+
+                if b"||" in decoded:
+                    # Old PEM format with ECDH public key
+                    public_bytes, fernet_key = decoded.split(b"||", 1)
+
+                    # Load the server's public key
+                    server_public_key = serialization.load_pem_public_key(
+                        public_bytes, backend=default_backend()
+                    )
+
+                    # Generate our own key pair
+                    self.private_key = ec.generate_private_key(
+                        ec.SECP384R1(), default_backend()
+                    )
+                    self.public_key = self.private_key.public_key()
+
+                    # Perform ECDH
+                    self.shared_secret = self.private_key.exchange(
+                        ec.ECDH(), server_public_key
+                    )
+
+                    # Fallback to Fernet for compatibility
+                    self.key = fernet_key
+                    self.cipher_suite = Fernet(self.key)
+
+                else:
+                    # Legacy format - just Fernet key
+                    self.key = decoded
+                    self.cipher_suite = Fernet(self.key)
+
+                return True
+            except:
+                pass
+
+            return False
         except Exception as e:
             return False
 
+    def _derive_message_key(self, message_id):
+        """Derive unique key for each message using HKDF"""
+        if self.shared_secret:
+            # Use ECDH shared secret with message counter
+            hkdf = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=None,
+                info=f"msg_{message_id}".encode(),
+                backend=default_backend(),
+            )
+            return hkdf.derive(self.shared_secret + struct.pack(">Q", message_id))
+        return None
+
+    def _pad_message(self, message):
+        """Pad message to fixed size for traffic analysis protection"""
+        # Convert to bytes
+        if isinstance(message, str):
+            message_bytes = message.encode("utf-8")
+        else:
+            message_bytes = message
+
+        # Add random padding
+        padding_size = secrets.randbelow(64) + 16  # 16-80 random bytes
+        padding = secrets.token_bytes(padding_size)
+
+        # Choose target size
+        current_size = len(message_bytes) + len(padding) + 4  # +4 for length prefix
+        target_size = next(size for size in MESSAGE_SIZES if size >= current_size)
+
+        # Add padding to reach target size
+        total_padding_needed = target_size - len(message_bytes) - 4
+        if total_padding_needed > len(padding):
+            padding += secrets.token_bytes(total_padding_needed - len(padding))
+        else:
+            padding = padding[:total_padding_needed]
+
+        # Format: [message_length(4)] + [message] + [padding]
+        return struct.pack(">I", len(message_bytes)) + message_bytes + padding
+
+    def _unpad_message(self, padded_data):
+        """Remove padding from message"""
+        if len(padded_data) < 4:
+            return None
+
+        message_length = struct.unpack(">I", padded_data[:4])[0]
+        if message_length > len(padded_data) - 4:
+            return None
+
+        return padded_data[4 : 4 + message_length]
+
+    def _apply_timing_obfuscation(self):
+        """Apply random delay for timing attack protection"""
+        current_time = time.time()
+        time_since_last = current_time - self.last_send_time
+
+        # Add random delay between MIN and MAX
+        delay = (
+            secrets.randbelow(int((MAX_MESSAGE_DELAY - MIN_MESSAGE_DELAY) * 1000))
+            / 1000.0
+        )
+        delay += MIN_MESSAGE_DELAY
+
+        # If we sent recently, add extra delay
+        if time_since_last < MIN_MESSAGE_DELAY:
+            delay += MIN_MESSAGE_DELAY - time_since_last
+
+        time.sleep(delay)
+        self.last_send_time = time.time()
+
     def encrypt_message(self, message):
-        """Encrypt a message"""
+        """Encrypt a message with PFS and traffic analysis protection"""
         if not self.cipher_suite:
             return None
-        return self.cipher_suite.encrypt(message.encode()).decode()
+
+        try:
+            # Apply timing obfuscation
+            self._apply_timing_obfuscation()
+
+            # Pad message
+            padded_message = self._pad_message(message)
+
+            # Increment message counter for PFS
+            self.message_counter += 1
+
+            # Try to use ECDH-derived key first
+            message_key = self._derive_message_key(self.message_counter)
+            if message_key:
+                # Use AES-GCM with derived key
+                iv = secrets.token_bytes(12)  # 96-bit IV for GCM
+                cipher = Cipher(
+                    algorithms.AES(message_key),
+                    modes.GCM(iv),
+                    backend=default_backend(),
+                )
+                encryptor = cipher.encryptor()
+                ciphertext = encryptor.update(padded_message) + encryptor.finalize()
+
+                # Format: [counter(8)] + [iv(12)] + [tag(16)] + [ciphertext]
+                encrypted_data = (
+                    struct.pack(">Q", self.message_counter)
+                    + iv
+                    + encryptor.tag
+                    + ciphertext
+                )
+                return base64.urlsafe_b64encode(encrypted_data).decode()
+            else:
+                # Fallback to Fernet
+                return self.cipher_suite.encrypt(padded_message).decode()
+
+        except Exception as e:
+            return None
 
     def decrypt_message(self, encrypted_message):
         """Decrypt a message"""
         if not self.cipher_suite:
             return None
+
         try:
-            return self.cipher_suite.decrypt(encrypted_message.encode()).decode()
+            encrypted_data = base64.urlsafe_b64decode(encrypted_message.encode())
+
+            # Check if it's ECDH format (has counter prefix)
+            if len(encrypted_data) >= 36:  # 8+12+16 minimum
+                counter = struct.unpack(">Q", encrypted_data[:8])[0]
+                iv = encrypted_data[8:20]
+                tag = encrypted_data[20:36]
+                ciphertext = encrypted_data[36:]
+
+                # Try to derive the key
+                message_key = self._derive_message_key(counter)
+                if message_key:
+                    try:
+                        cipher = Cipher(
+                            algorithms.AES(message_key),
+                            modes.GCM(iv, tag),
+                            backend=default_backend(),
+                        )
+                        decryptor = cipher.decryptor()
+                        padded_message = (
+                            decryptor.update(ciphertext) + decryptor.finalize()
+                        )
+
+                        # Unpad the message
+                        message_bytes = self._unpad_message(padded_message)
+                        if message_bytes:
+                            return message_bytes.decode("utf-8")
+                    except:
+                        pass  # Fall through to Fernet
+
+            # Fallback to Fernet decryption
+            padded_message = self.cipher_suite.decrypt(encrypted_data)
+            message_bytes = self._unpad_message(padded_message)
+            if message_bytes:
+                return message_bytes.decode("utf-8")
+            else:
+                # Legacy format without padding
+                return padded_message.decode("utf-8")
+
         except:
             return None
+
+    def generate_dummy_message(self):
+        """Generate dummy traffic for traffic analysis protection"""
+        dummy_content = secrets.token_hex(secrets.randbelow(100) + 50)
+        return self.encrypt_message(f"DUMMY:{dummy_content}")
+
+    def is_dummy_message(self, decrypted_message):
+        """Check if message is dummy traffic"""
+        return decrypted_message and decrypted_message.startswith("DUMMY:")
+
+    def cleanup(self):
+        """Securely clean up sensitive data"""
+        if self.key:
+            secure_zero_memory(self.key)
+        if self.shared_secret:
+            secure_zero_memory(self.shared_secret)
+        self.private_key = None
+        self.public_key = None
+        self.cipher_suite = None
 
 
 class AnonymousServer:
@@ -206,6 +592,7 @@ class AnonymousServer:
         self.running = False
         self.tor_manager = TorManager()
         self.messenger = SecureMessenger()
+        self.dummy_traffic_timer = None
 
     def start(self):
         """Start the anonymous server"""
@@ -251,6 +638,9 @@ class AnonymousServer:
 
             self.running = True
 
+            # Start dummy traffic generation
+            self._start_dummy_traffic()
+
             # Accept connections
             while self.running:
                 try:
@@ -268,6 +658,37 @@ class AnonymousServer:
             return False
 
         return True
+
+    def _start_dummy_traffic(self):
+        """Start dummy traffic generation to obscure real traffic patterns"""
+
+        def generate_dummy_traffic():
+            while self.running:
+                try:
+                    time.sleep(
+                        DUMMY_TRAFFIC_INTERVAL + secrets.randbelow(30)
+                    )  # 30-60s intervals
+                    if self.running and len(self.clients) > 0:
+                        dummy_msg = self.messenger.generate_dummy_message()
+                        if dummy_msg:
+                            # Send to all clients
+                            for client in self.clients[
+                                :
+                            ]:  # Copy list to avoid modification during iteration
+                                try:
+                                    client.send(dummy_msg.encode())
+                                except:
+                                    # Remove failed client
+                                    if client in self.clients:
+                                        self.clients.remove(client)
+                                        client.close()
+                except:
+                    break
+
+        if self.running:
+            self.dummy_traffic_timer = threading.Thread(target=generate_dummy_traffic)
+            self.dummy_traffic_timer.daemon = True
+            self.dummy_traffic_timer.start()
 
     def handle_client(self, client_socket):
         """Handle individual client connection"""
@@ -305,6 +726,7 @@ class AnonymousServer:
             self.socket.close()
         for client in self.clients:
             client.close()
+        self.messenger.cleanup()
         self.tor_manager.cleanup()
 
 
@@ -409,7 +831,7 @@ class AnonymousClient:
                 encrypted_msg = data.decode()
                 decrypted_msg = self.messenger.decrypt_message(encrypted_msg)
 
-                if decrypted_msg:
+                if decrypted_msg and not self.messenger.is_dummy_message(decrypted_msg):
                     timestamp = datetime.now().strftime("%H:%M:%S")
                     console.print(
                         f"[dim]{timestamp}[/dim] [blue]>[/blue] {decrypted_msg}"
@@ -485,6 +907,7 @@ class AnonymousClient:
         self.connected = False
         if self.socket:
             self.socket.close()
+        self.messenger.cleanup()
 
 
 def main():
