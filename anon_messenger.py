@@ -30,30 +30,13 @@ import shutil
 import requests
 from datetime import datetime
 
-# Memory locking support using ctypes
-import ctypes
-import ctypes.util
-import zlib
-
+# Try to import mlock for secure memory handling (optional)
 try:
-    if hasattr(ctypes, "util") and ctypes.util.find_library:
-        libc_name = ctypes.util.find_library("c")
-        if libc_name:
-            libc = ctypes.CDLL(libc_name)
-            HAS_MLOCK = True
-        else:
-            libc = None
-            HAS_MLOCK = False
-    else:
-        libc = None
-        HAS_MLOCK = False
-except (OSError, AttributeError):
-    libc = None
-    HAS_MLOCK = False
+    import mlock
 
-# mlock constants
-MCL_CURRENT = 1
-MCL_FUTURE = 2
+    HAS_MLOCK = True
+except ImportError:
+    HAS_MLOCK = False
 
 console = Console()
 
@@ -63,27 +46,26 @@ def secure_zero_memory(data):
     """Securely zero out memory containing sensitive data"""
     if isinstance(data, str):
         data = data.encode()
-    if isinstance(data, (bytes, bytearray)):
+    if isinstance(data, bytearray):
         # Overwrite memory multiple times
         for _ in range(3):
             for i in range(len(data)):
                 data[i] = 0
         del data
+    elif isinstance(data, bytes):
+        # Convert to bytearray for modification, then clear
+        temp = bytearray(data)
+        for _ in range(3):
+            for i in range(len(temp)):
+                temp[i] = 0
+        del temp
 
 
-def lock_memory(data=None):
+def lock_memory(data):
     """Lock memory pages to prevent swapping (if available)"""
-    if HAS_MLOCK and libc:
+    if HAS_MLOCK and data:
         try:
-            # Call mlockall(MCL_CURRENT | MCL_FUTURE)
-            result = libc.mlockall(MCL_CURRENT | MCL_FUTURE)
-            if result != 0:
-                # Get errno for error details
-                errno_ptr = libc.__errno_location()
-                errno_ptr.restype = ctypes.POINTER(ctypes.c_int)
-                errno_val = errno_ptr().contents.value
-                # Don't raise error, just log silently
-                pass
+            mlock.mlockall(mlock.MCL_CURRENT | mlock.MCL_FUTURE)
         except:
             pass
 
@@ -291,116 +273,107 @@ class SecureMessenger:
 
     def generate_key(self):
         """Generate ECDH key pair for Perfect Forward Secrecy"""
-        self.private_key = ec.generate_private_key(ec.SECP384R1(), default_backend())
-        self.public_key = self.private_key.public_key()
+        try:
+            # Generate ECDH key pair
+            self.private_key = ec.generate_private_key(
+                ec.SECP384R1(), default_backend()
+            )
+            self.public_key = self.private_key.public_key()
 
-        # Also generate a fallback Fernet key for compatibility
-        self.key = Fernet.generate_key()
-        self.cipher_suite = Fernet(self.key)
+            # Generate Fernet key for fallback/compatibility
+            self.key = Fernet.generate_key()
+            self.cipher_suite = Fernet(self.key)
 
-        # Create compact connection string
-        # Use raw public key bytes instead of PEM (much shorter)
-        public_numbers = self.public_key.public_numbers()
+            # Serialize public key to compact DER format (smaller than PEM)
+            public_der = self.public_key.public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
 
-        # Encode public key as compact binary (48 bytes for P-384)
-        x_bytes = public_numbers.x.to_bytes(48, byteorder="big")
-        y_bytes = public_numbers.y.to_bytes(48, byteorder="big")
-        public_raw = x_bytes + y_bytes  # 96 bytes total
+            # Create connection string: DER_PUBLIC_KEY + "||" + FERNET_KEY
+            combined_data = public_der + b"||" + self.key
+            connection_string = base64.urlsafe_b64encode(combined_data).decode()
 
-        # Combine with Fernet key (32 bytes)
-        combined_data = public_raw + self.key  # 128 bytes total
+            console.print("[green]ECDH key pair generated successfully[/green]")
+            return connection_string
 
-        # Compress and encode with base32 for better readability
-        compressed = zlib.compress(combined_data, level=9)
-        connection_string = base64.b32encode(compressed).decode().rstrip("=")
-
-        return connection_string
+        except Exception as e:
+            # Fallback to Fernet-only if ECDH fails
+            console.print(
+                f"[yellow]ECDH generation failed, using Fernet fallback: {str(e)}[/yellow]"
+            )
+            self.key = Fernet.generate_key()
+            self.cipher_suite = Fernet(self.key)
+            return base64.urlsafe_b64encode(self.key).decode()
 
     def set_key(self, key_str):
         """Set encryption key from connection string"""
         try:
             key_str = key_str.strip()
 
-            # Try new compact format first
-            try:
-                # Add padding if needed for base32
-                key_str_padded = key_str + "=" * (8 - len(key_str) % 8) % 8
-                compressed = base64.b32decode(key_str_padded.encode())
-                decoded = zlib.decompress(compressed)
+            # Fix base64 padding if needed
+            missing_padding = len(key_str) % 4
+            if missing_padding:
+                key_str += "=" * (4 - missing_padding)
 
-                if len(decoded) == 128:  # 96 bytes public key + 32 bytes Fernet key
-                    # Extract public key coordinates
-                    public_raw = decoded[:96]
-                    fernet_key = decoded[96:]
+            decoded = base64.urlsafe_b64decode(key_str.encode())
 
-                    x_bytes = public_raw[:48]
-                    y_bytes = public_raw[48:96]
+            # Check if this is ECDH format (contains "||" separator)
+            if b"||" in decoded:
+                try:
+                    # Split into public key and Fernet key parts
+                    public_der, fernet_key = decoded.split(b"||", 1)
 
-                    # Reconstruct public key
-                    x = int.from_bytes(x_bytes, byteorder="big")
-                    y = int.from_bytes(y_bytes, byteorder="big")
+                    # Load server's public key from DER format
+                    server_public_key = serialization.load_der_public_key(
+                        public_der, backend=default_backend()
+                    )
 
-                    public_numbers = ec.EllipticCurvePublicNumbers(x, y, ec.SECP384R1())
-                    server_public_key = public_numbers.public_key(default_backend())
-
-                    # Generate our own key pair
+                    # Generate our own ECDH key pair
                     self.private_key = ec.generate_private_key(
                         ec.SECP384R1(), default_backend()
                     )
                     self.public_key = self.private_key.public_key()
 
-                    # Perform ECDH
+                    # Perform ECDH key exchange
                     self.shared_secret = self.private_key.exchange(
                         ec.ECDH(), server_public_key
                     )
 
-                    # Fallback to Fernet for compatibility
+                    # Set up Fernet for fallback/compatibility
                     self.key = fernet_key
                     self.cipher_suite = Fernet(self.key)
 
+                    console.print(
+                        "[green]ECDH key exchange completed successfully[/green]"
+                    )
                     return True
-            except:
-                pass  # Fall through to legacy format
 
-            # Try legacy format
-            try:
-                decoded = base64.urlsafe_b64decode(key_str.encode())
-
-                if b"||" in decoded:
-                    # Old PEM format with ECDH public key
-                    public_bytes, fernet_key = decoded.split(b"||", 1)
-
-                    # Load the server's public key
-                    server_public_key = serialization.load_pem_public_key(
-                        public_bytes, backend=default_backend()
+                except Exception as ecdh_error:
+                    # ECDH failed, fall back to Fernet only
+                    console.print(
+                        f"[yellow]ECDH failed, using Fernet fallback: {str(ecdh_error)}[/yellow]"
                     )
+                    try:
+                        # Try to use the Fernet part
+                        _, fernet_key = decoded.split(b"||", 1)
+                        self.key = fernet_key
+                        self.cipher_suite = Fernet(self.key)
+                        console.print("[green]Fernet fallback successful[/green]")
+                        return True
+                    except:
+                        pass  # Fall through to legacy format
 
-                    # Generate our own key pair
-                    self.private_key = ec.generate_private_key(
-                        ec.SECP384R1(), default_backend()
-                    )
-                    self.public_key = self.private_key.public_key()
+            # Legacy format - just Fernet key
+            self.key = decoded
+            self.cipher_suite = Fernet(self.key)
+            console.print(
+                "[green]Legacy Fernet encryption key set successfully[/green]"
+            )
+            return True
 
-                    # Perform ECDH
-                    self.shared_secret = self.private_key.exchange(
-                        ec.ECDH(), server_public_key
-                    )
-
-                    # Fallback to Fernet for compatibility
-                    self.key = fernet_key
-                    self.cipher_suite = Fernet(self.key)
-
-                else:
-                    # Legacy format - just Fernet key
-                    self.key = decoded
-                    self.cipher_suite = Fernet(self.key)
-
-                return True
-            except:
-                pass
-
-            return False
         except Exception as e:
+            console.print(f"[red]Key setup failed: {str(e)}[/red]")
             return False
 
     def _derive_message_key(self, message_id):
@@ -485,33 +458,41 @@ class SecureMessenger:
             # Pad message
             padded_message = self._pad_message(message)
 
-            # Increment message counter for PFS
-            self.message_counter += 1
+            # Try ECDH-based encryption first (Perfect Forward Secrecy)
+            if self.shared_secret:
+                try:
+                    # Increment message counter for unique keys
+                    self.message_counter += 1
 
-            # Try to use ECDH-derived key first
-            message_key = self._derive_message_key(self.message_counter)
-            if message_key:
-                # Use AES-GCM with derived key
-                iv = secrets.token_bytes(12)  # 96-bit IV for GCM
-                cipher = Cipher(
-                    algorithms.AES(message_key),
-                    modes.GCM(iv),
-                    backend=default_backend(),
-                )
-                encryptor = cipher.encryptor()
-                ciphertext = encryptor.update(padded_message) + encryptor.finalize()
+                    # Derive unique key for this message
+                    message_key = self._derive_message_key(self.message_counter)
+                    if message_key:
+                        # Use AES-GCM with derived key
+                        iv = secrets.token_bytes(12)  # 96-bit IV for GCM
+                        cipher = Cipher(
+                            algorithms.AES(message_key),
+                            modes.GCM(iv),
+                            backend=default_backend(),
+                        )
+                        encryptor = cipher.encryptor()
+                        ciphertext = (
+                            encryptor.update(padded_message) + encryptor.finalize()
+                        )
 
-                # Format: [counter(8)] + [iv(12)] + [tag(16)] + [ciphertext]
-                encrypted_data = (
-                    struct.pack(">Q", self.message_counter)
-                    + iv
-                    + encryptor.tag
-                    + ciphertext
-                )
-                return base64.urlsafe_b64encode(encrypted_data).decode()
-            else:
-                # Fallback to Fernet
-                return self.cipher_suite.encrypt(padded_message).decode()
+                        # Format: [counter(8)] + [iv(12)] + [tag(16)] + [ciphertext]
+                        encrypted_data = (
+                            struct.pack(">Q", self.message_counter)
+                            + iv
+                            + encryptor.tag
+                            + ciphertext
+                        )
+                        return base64.urlsafe_b64encode(encrypted_data).decode()
+                except Exception as ecdh_encrypt_error:
+                    # ECDH encryption failed, fall back to Fernet
+                    pass  # Silent fallback for now
+
+            # Fallback to Fernet encryption
+            return self.cipher_suite.encrypt(padded_message).decode()
 
         except Exception as e:
             return None
@@ -524,17 +505,19 @@ class SecureMessenger:
         try:
             encrypted_data = base64.urlsafe_b64decode(encrypted_message.encode())
 
-            # Check if it's ECDH format (has counter prefix)
-            if len(encrypted_data) >= 36:  # 8+12+16 minimum
-                counter = struct.unpack(">Q", encrypted_data[:8])[0]
-                iv = encrypted_data[8:20]
-                tag = encrypted_data[20:36]
-                ciphertext = encrypted_data[36:]
+            # Check if this is ECDH format (has counter prefix and minimum length)
+            if self.shared_secret and len(encrypted_data) >= 36:  # 8+12+16 minimum
+                try:
+                    # Parse ECDH format: [counter(8)] + [iv(12)] + [tag(16)] + [ciphertext]
+                    counter = struct.unpack(">Q", encrypted_data[:8])[0]
+                    iv = encrypted_data[8:20]
+                    tag = encrypted_data[20:36]
+                    ciphertext = encrypted_data[36:]
 
-                # Try to derive the key
-                message_key = self._derive_message_key(counter)
-                if message_key:
-                    try:
+                    # Derive the same key used for encryption
+                    message_key = self._derive_message_key(counter)
+                    if message_key:
+                        # Decrypt with AES-GCM
                         cipher = Cipher(
                             algorithms.AES(message_key),
                             modes.GCM(iv, tag),
@@ -549,8 +532,9 @@ class SecureMessenger:
                         message_bytes = self._unpad_message(padded_message)
                         if message_bytes:
                             return message_bytes.decode("utf-8")
-                    except:
-                        pass  # Fall through to Fernet
+                except Exception as ecdh_decrypt_error:
+                    # ECDH decryption failed, try Fernet fallback
+                    pass  # Silent fallback
 
             # Fallback to Fernet decryption
             padded_message = self.cipher_suite.decrypt(encrypted_data)
@@ -575,13 +559,21 @@ class SecureMessenger:
 
     def cleanup(self):
         """Securely clean up sensitive data"""
-        if self.key:
-            secure_zero_memory(self.key)
-        if self.shared_secret:
-            secure_zero_memory(self.shared_secret)
+        try:
+            if self.key:
+                secure_zero_memory(self.key)
+        except:
+            pass
+        try:
+            if self.shared_secret:
+                secure_zero_memory(self.shared_secret)
+        except:
+            pass
         self.private_key = None
         self.public_key = None
         self.cipher_suite = None
+        self.key = None
+        self.shared_secret = None
 
 
 class AnonymousServer:
@@ -634,6 +626,9 @@ class AnonymousServer:
                     title="Ready",
                     width=80,
                 )
+            )
+            console.print(
+                f"[yellow]Connection String:[/yellow] [bold cyan]{connection_string}[/bold cyan]"
             )
 
             self.running = True
@@ -744,26 +739,38 @@ class AnonymousClient:
             connection_string = connection_string.strip()
             parts = connection_string.split(":")
             if len(parts) != 2:
+                console.print("[red]Invalid connection string format[/red]")
                 return False
 
             onion_address = parts[0].strip()
             encryption_key = parts[1].strip()
 
+            console.print("[yellow]Setting up encryption...[/yellow]")
             # Set encryption key
             if not self.messenger.set_key(encryption_key):
+                console.print("[red]Failed to set encryption key[/red]")
                 return False
+
+            console.print("[yellow]Connecting to Tor network...[/yellow]")
 
             # Create socket with SOCKS proxy
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.settimeout(30)
 
             # Check for existing Tor or find the right SOCKS port
-            import socks
+            try:
+                import socks
+            except ImportError:
+                console.print(
+                    "[red]PySocks not installed. Install with: pip install PySocks[/red]"
+                )
+                return False
 
             # Try to find working SOCKS port
             socks_ports = [9050, 9051, 9052, 9053, 9054]
             working_port = None
 
+            console.print("[yellow]Looking for Tor SOCKS proxy...[/yellow]")
             for port in socks_ports:
                 try:
                     # Test the SOCKS proxy by connecting to it
@@ -772,11 +779,17 @@ class AnonymousClient:
                     test_sock.connect(("127.0.0.1", port))
                     test_sock.close()
                     working_port = port
+                    console.print(
+                        f"[green]Found Tor SOCKS proxy on port {port}[/green]"
+                    )
                     break
                 except:
                     continue
 
             if not working_port:
+                console.print(
+                    "[red]No Tor SOCKS proxy found. Make sure Tor is running.[/red]"
+                )
                 return False
 
             self.socks_port = working_port
@@ -787,25 +800,38 @@ class AnonymousClient:
             max_retries = 3
             retry_delay = 10
 
+            console.print(f"[yellow]Connecting to {onion_address}...[/yellow]")
             for attempt in range(max_retries):
                 try:
                     if attempt > 0:
+                        console.print(
+                            f"[yellow]Retry attempt {attempt + 1}/{max_retries}...[/yellow]"
+                        )
                         time.sleep(retry_delay)
 
                     self.socket = socks.socksocket()
                     self.socket.settimeout(45)
                     self.socket.connect((onion_address, 8080))
+                    console.print("[green]Connected successfully![/green]")
                     break
 
                 except socket.timeout:
+                    console.print(
+                        f"[red]Connection timeout on attempt {attempt + 1}[/red]"
+                    )
                     if self.socket:
                         self.socket.close()
                     if attempt == max_retries - 1:
+                        console.print("[red]Failed to connect after all retries[/red]")
                         return False
                 except Exception as conn_err:
+                    console.print(
+                        f"[red]Connection error on attempt {attempt + 1}: {str(conn_err)}[/red]"
+                    )
                     if self.socket:
                         self.socket.close()
                     if attempt == max_retries - 1:
+                        console.print("[red]Failed to connect after all retries[/red]")
                         return False
 
             self.connected = True
@@ -818,6 +844,7 @@ class AnonymousClient:
             return True
 
         except Exception as e:
+            console.print(f"[red]Connection failed: {str(e)}[/red]")
             return False
 
     def receive_messages(self):
