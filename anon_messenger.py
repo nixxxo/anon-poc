@@ -279,18 +279,17 @@ class AnonymousServer:
                 if not data:
                     break
 
-                # Decrypt and broadcast message
-                encrypted_msg = data.decode()
-                decrypted_msg = self.messenger.decrypt_message(encrypted_msg)
-
-                if decrypted_msg:
-                    # Re-encrypt and send to all other clients
-                    for client in self.clients:
-                        if client != client_socket:
-                            try:
-                                client.send(data)
-                            except:
-                                pass
+                # Forward encrypted message to all other clients
+                # No need to decrypt since all clients share the same key
+                for client in self.clients:
+                    if client != client_socket:
+                        try:
+                            client.send(data)
+                        except:
+                            # Remove failed client
+                            if client in self.clients:
+                                self.clients.remove(client)
+                                client.close()
 
         except Exception as e:
             pass
@@ -416,7 +415,10 @@ class AnonymousClient:
                         f"[dim]{timestamp}[/dim] [blue]>[/blue] {decrypted_msg}"
                     )
 
-            except:
+            except Exception as e:
+                # Only break on socket errors, not decryption errors
+                if self.connected:
+                    continue
                 break
 
     def send_message(self, message):
@@ -431,8 +433,10 @@ class AnonymousClient:
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 console.print(f"[dim]{timestamp}[/dim] [cyan]You:[/cyan] {message}")
                 return True
-        except:
-            pass
+        except Exception as e:
+            # Connection lost
+            self.connected = False
+            console.print(f"[red]Connection lost[/red]")
 
         return False
 
@@ -441,12 +445,14 @@ class AnonymousClient:
         while self.connected:
             try:
                 message = input()
-                if message.lower() in ["quit", "exit", "/quit", "/exit"]:
+                if message.lower().strip() in ["quit", "exit", "/quit", "/exit"]:
                     self.connected = False
                     break
 
                 if message.strip():
-                    self.send_message(message)
+                    if not self.send_message(message):
+                        # Failed to send, connection might be lost
+                        break
             except (KeyboardInterrupt, EOFError):
                 self.connected = False
                 break
