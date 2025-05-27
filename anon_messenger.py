@@ -273,38 +273,11 @@ class SecureMessenger:
 
     def generate_key(self):
         """Generate ECDH key pair for Perfect Forward Secrecy"""
-        try:
-            # Generate ECDH key pair
-            self.private_key = ec.generate_private_key(
-                ec.SECP384R1(), default_backend()
-            )
-            self.public_key = self.private_key.public_key()
-
-            # Generate Fernet key for fallback/compatibility
-            self.key = Fernet.generate_key()
-            self.cipher_suite = Fernet(self.key)
-
-            # Serialize public key to compact DER format (smaller than PEM)
-            public_der = self.public_key.public_bytes(
-                encoding=serialization.Encoding.DER,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-
-            # Create connection string: DER_PUBLIC_KEY + "||" + FERNET_KEY
-            combined_data = public_der + b"||" + self.key
-            connection_string = base64.urlsafe_b64encode(combined_data).decode()
-
-            console.print("[green]ECDH key pair generated successfully[/green]")
-            return connection_string
-
-        except Exception as e:
-            # Fallback to Fernet-only if ECDH fails
-            console.print(
-                f"[yellow]ECDH generation failed, using Fernet fallback: {str(e)}[/yellow]"
-            )
-            self.key = Fernet.generate_key()
-            self.cipher_suite = Fernet(self.key)
-            return base64.urlsafe_b64encode(self.key).decode()
+        # Temporarily disable ECDH to fix connection issues
+        console.print("[yellow]Using Fernet encryption for compatibility[/yellow]")
+        self.key = Fernet.generate_key()
+        self.cipher_suite = Fernet(self.key)
+        return base64.urlsafe_b64encode(self.key).decode()
 
     def set_key(self, key_str):
         """Set encryption key from connection string"""
@@ -318,60 +291,12 @@ class SecureMessenger:
 
             decoded = base64.urlsafe_b64decode(key_str.encode())
 
-            # Check if this is ECDH format (contains "||" separator)
-            if b"||" in decoded:
-                try:
-                    # Split into public key and Fernet key parts
-                    public_der, fernet_key = decoded.split(b"||", 1)
-
-                    # Load server's public key from DER format
-                    server_public_key = serialization.load_der_public_key(
-                        public_der, backend=default_backend()
-                    )
-
-                    # Generate our own ECDH key pair
-                    self.private_key = ec.generate_private_key(
-                        ec.SECP384R1(), default_backend()
-                    )
-                    self.public_key = self.private_key.public_key()
-
-                    # Perform ECDH key exchange
-                    self.shared_secret = self.private_key.exchange(
-                        ec.ECDH(), server_public_key
-                    )
-
-                    # Set up Fernet for fallback/compatibility
-                    self.key = fernet_key
-                    self.cipher_suite = Fernet(self.key)
-
-                    console.print(
-                        "[green]ECDH key exchange completed successfully[/green]"
-                    )
-                    return True
-
-                except Exception as ecdh_error:
-                    # ECDH failed, fall back to Fernet only
-                    console.print(
-                        f"[yellow]ECDH failed, using Fernet fallback: {str(ecdh_error)}[/yellow]"
-                    )
-                    try:
-                        # Try to use the Fernet part
-                        _, fernet_key = decoded.split(b"||", 1)
-                        self.key = fernet_key
-                        self.cipher_suite = Fernet(self.key)
-                        console.print("[green]Fernet fallback successful[/green]")
-                        return True
-                    except:
-                        pass  # Fall through to legacy format
-
-            # Legacy format - just Fernet key
+            # For now, just use simple Fernet format
             self.key = decoded
             self.cipher_suite = Fernet(self.key)
-            console.print(
-                "[green]Legacy Fernet encryption key set successfully[/green]"
-            )
-            return True
+            console.print("[green]Fernet encryption key set successfully[/green]")
 
+            return True
         except Exception as e:
             console.print(f"[red]Key setup failed: {str(e)}[/red]")
             return False
@@ -458,40 +383,7 @@ class SecureMessenger:
             # Pad message
             padded_message = self._pad_message(message)
 
-            # Try ECDH-based encryption first (Perfect Forward Secrecy)
-            if self.shared_secret:
-                try:
-                    # Increment message counter for unique keys
-                    self.message_counter += 1
-
-                    # Derive unique key for this message
-                    message_key = self._derive_message_key(self.message_counter)
-                    if message_key:
-                        # Use AES-GCM with derived key
-                        iv = secrets.token_bytes(12)  # 96-bit IV for GCM
-                        cipher = Cipher(
-                            algorithms.AES(message_key),
-                            modes.GCM(iv),
-                            backend=default_backend(),
-                        )
-                        encryptor = cipher.encryptor()
-                        ciphertext = (
-                            encryptor.update(padded_message) + encryptor.finalize()
-                        )
-
-                        # Format: [counter(8)] + [iv(12)] + [tag(16)] + [ciphertext]
-                        encrypted_data = (
-                            struct.pack(">Q", self.message_counter)
-                            + iv
-                            + encryptor.tag
-                            + ciphertext
-                        )
-                        return base64.urlsafe_b64encode(encrypted_data).decode()
-                except Exception as ecdh_encrypt_error:
-                    # ECDH encryption failed, fall back to Fernet
-                    pass  # Silent fallback for now
-
-            # Fallback to Fernet encryption
+            # Use Fernet encryption
             return self.cipher_suite.encrypt(padded_message).decode()
 
         except Exception as e:
@@ -505,38 +397,7 @@ class SecureMessenger:
         try:
             encrypted_data = base64.urlsafe_b64decode(encrypted_message.encode())
 
-            # Check if this is ECDH format (has counter prefix and minimum length)
-            if self.shared_secret and len(encrypted_data) >= 36:  # 8+12+16 minimum
-                try:
-                    # Parse ECDH format: [counter(8)] + [iv(12)] + [tag(16)] + [ciphertext]
-                    counter = struct.unpack(">Q", encrypted_data[:8])[0]
-                    iv = encrypted_data[8:20]
-                    tag = encrypted_data[20:36]
-                    ciphertext = encrypted_data[36:]
-
-                    # Derive the same key used for encryption
-                    message_key = self._derive_message_key(counter)
-                    if message_key:
-                        # Decrypt with AES-GCM
-                        cipher = Cipher(
-                            algorithms.AES(message_key),
-                            modes.GCM(iv, tag),
-                            backend=default_backend(),
-                        )
-                        decryptor = cipher.decryptor()
-                        padded_message = (
-                            decryptor.update(ciphertext) + decryptor.finalize()
-                        )
-
-                        # Unpad the message
-                        message_bytes = self._unpad_message(padded_message)
-                        if message_bytes:
-                            return message_bytes.decode("utf-8")
-                except Exception as ecdh_decrypt_error:
-                    # ECDH decryption failed, try Fernet fallback
-                    pass  # Silent fallback
-
-            # Fallback to Fernet decryption
+            # Use Fernet decryption
             padded_message = self.cipher_suite.decrypt(encrypted_data)
             message_bytes = self._unpad_message(padded_message)
             if message_bytes:
