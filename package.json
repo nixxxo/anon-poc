@@ -21,8 +21,5 @@
 		"onion"
 	],
 	"author": "",
-	"license": "MIT",
-	"dependencies": {
-		"ths": "^2.1.5"
-	}
+	"license": "MIT"
 }

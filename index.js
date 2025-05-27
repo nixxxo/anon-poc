@@ -39,11 +39,12 @@ if (majorVersion < 18) {
 process.removeAllListeners("warning");
 process.on("warning", () => {}); // Suppress warnings
 
-// Anti-debugging measures
-if (process.env.NODE_ENV !== "development") {
+// Anti-debugging measures (skip on server environments)
+if (process.env.NODE_ENV !== "development" && !process.env.SERVER_MODE) {
 	const startTime = Date.now();
 	setImmediate(() => {
-		if (Date.now() - startTime > 100) {
+		if (Date.now() - startTime > 1000) {
+			// Increased to 1 second for VPS environments
 			console.error("❌ Potential debugging detected");
 			process.exit(1);
 		}
