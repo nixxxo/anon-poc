@@ -12,6 +12,7 @@ import secrets
 import hashlib
 import hmac
 import struct
+import logging
 from stem.control import Controller  # type: ignore
 from stem import Signal
 import stem.process
@@ -29,6 +30,22 @@ import tempfile
 import shutil
 import requests
 from datetime import datetime
+
+# Configure logging
+log_level = logging.DEBUG if os.getenv("DEBUG_ANON_MESSENGER") else logging.INFO
+logging.basicConfig(
+    level=log_level,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("anon_messenger.log"),
+        (
+            logging.StreamHandler()
+            if os.getenv("DEBUG_ANON_MESSENGER")
+            else logging.NullHandler()
+        ),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 # Try to import mlock for secure memory handling (optional)
 try:
@@ -273,14 +290,26 @@ class SecureMessenger:
 
     def generate_key(self):
         """Generate ECDH key pair for Perfect Forward Secrecy"""
+        logger.info("generate_key: Starting key generation")
         # Temporarily disable ECDH to fix connection issues
         console.print("[yellow]Using Fernet encryption for compatibility[/yellow]")
+        logger.debug("generate_key: Using Fernet encryption")
+
         self.key = Fernet.generate_key()
         self.cipher_suite = Fernet(self.key)
-        return base64.urlsafe_b64encode(self.key).decode()
+
+        result = base64.urlsafe_b64encode(self.key).decode()
+        logger.info(f"generate_key: Successfully generated key, length: {len(result)}")
+        logger.debug(f"generate_key: Key preview: {result[:20]}...")
+        return result
 
     def set_key(self, key_str):
         """Set encryption key from connection string"""
+        logger.info(
+            f"set_key: Setting encryption key from string, length: {len(key_str)}"
+        )
+        logger.debug(f"set_key: Key string preview: {key_str[:20]}...")
+
         try:
             key_str = key_str.strip()
 
@@ -288,17 +317,22 @@ class SecureMessenger:
             missing_padding = len(key_str) % 4
             if missing_padding:
                 key_str += "=" * (4 - missing_padding)
+                logger.debug(f"set_key: Added {4 - missing_padding} padding characters")
 
+            logger.debug("set_key: Decoding base64 key")
             decoded = base64.urlsafe_b64decode(key_str.encode())
+            logger.debug(f"set_key: Decoded key length: {len(decoded)}")
 
             # For now, just use simple Fernet format
             self.key = decoded
             self.cipher_suite = Fernet(self.key)
             console.print("[green]Fernet encryption key set successfully[/green]")
+            logger.info("set_key: Successfully set encryption key")
 
             return True
         except Exception as e:
             console.print(f"[red]Key setup failed: {str(e)}[/red]")
+            logger.error(f"set_key: Key setup failed: {str(e)}", exc_info=True)
             return False
 
     def _derive_message_key(self, message_id):
@@ -317,19 +351,29 @@ class SecureMessenger:
 
     def _pad_message(self, message):
         """Pad message to fixed size for traffic analysis protection"""
+        logger.debug(
+            f"_pad_message: Starting padding for message: {repr(message[:50])}..."
+        )
+
         # Convert to bytes
         if isinstance(message, str):
             message_bytes = message.encode("utf-8")
         else:
             message_bytes = message
 
+        logger.debug(f"_pad_message: Message bytes length: {len(message_bytes)}")
+
         # Add random padding
         padding_size = secrets.randbelow(64) + 16  # 16-80 random bytes
         padding = secrets.token_bytes(padding_size)
+        logger.debug(f"_pad_message: Random padding size: {padding_size}")
 
         # Choose target size
         current_size = len(message_bytes) + len(padding) + 4  # +4 for length prefix
         target_size = next(size for size in MESSAGE_SIZES if size >= current_size)
+        logger.debug(
+            f"_pad_message: Current size: {current_size}, Target size: {target_size}"
+        )
 
         # Add padding to reach target size
         total_padding_needed = target_size - len(message_bytes) - 4
@@ -338,19 +382,44 @@ class SecureMessenger:
         else:
             padding = padding[:total_padding_needed]
 
+        logger.debug(
+            f"_pad_message: Total padding needed: {total_padding_needed}, Final padding length: {len(padding)}"
+        )
+
         # Format: [message_length(4)] + [message] + [padding]
-        return struct.pack(">I", len(message_bytes)) + message_bytes + padding
+        result = struct.pack(">I", len(message_bytes)) + message_bytes + padding
+        logger.debug(f"_pad_message: Final padded message length: {len(result)}")
+        return result
 
     def _unpad_message(self, padded_data):
         """Remove padding from message"""
+        logger.debug(
+            f"_unpad_message: Starting unpadding for data length: {len(padded_data)}"
+        )
+
         if len(padded_data) < 4:
+            logger.error(f"_unpad_message: Data too short, length: {len(padded_data)}")
             return None
 
         message_length = struct.unpack(">I", padded_data[:4])[0]
+        logger.debug(f"_unpad_message: Extracted message length: {message_length}")
+
         if message_length > len(padded_data) - 4:
+            logger.error(
+                f"_unpad_message: Invalid message length {message_length}, data length: {len(padded_data)}"
+            )
             return None
 
-        return padded_data[4 : 4 + message_length]
+        result = padded_data[4 : 4 + message_length]
+        logger.debug(
+            f"_unpad_message: Extracted message length: {len(result)}, content: {repr(result[:50])}..."
+        )
+
+        # Handle empty messages correctly
+        if message_length == 0:
+            return b""
+
+        return result
 
     def _apply_timing_obfuscation(self):
         """Apply random delay for timing attack protection"""
@@ -373,50 +442,102 @@ class SecureMessenger:
 
     def encrypt_message(self, message):
         """Encrypt a message with PFS and traffic analysis protection"""
+        logger.debug(
+            f"encrypt_message: Starting encryption for message: {repr(message[:50])}..."
+        )
+
         if not self.cipher_suite:
+            logger.error("encrypt_message: No cipher suite available")
             return None
 
         try:
             # Apply timing obfuscation
+            logger.debug("encrypt_message: Applying timing obfuscation")
             self._apply_timing_obfuscation()
 
             # Pad message
+            logger.debug("encrypt_message: Padding message")
             padded_message = self._pad_message(message)
+            logger.debug(
+                f"encrypt_message: Padded message length: {len(padded_message)}"
+            )
 
             # Use Fernet encryption
-            return self.cipher_suite.encrypt(padded_message).decode()
+            logger.debug("encrypt_message: Encrypting with Fernet")
+            encrypted_data = self.cipher_suite.encrypt(padded_message)
+            result = encrypted_data.decode()
+            logger.debug(
+                f"encrypt_message: Encryption successful, result length: {len(result)}"
+            )
+            logger.debug(f"encrypt_message: Encrypted data preview: {result[:100]}...")
+            return result
 
         except Exception as e:
+            logger.error(f"encrypt_message: Encryption failed: {str(e)}", exc_info=True)
             return None
 
     def decrypt_message(self, encrypted_message):
         """Decrypt a message"""
+        logger.debug(
+            f"decrypt_message: Starting decryption for message length: {len(encrypted_message)}"
+        )
+        logger.debug(
+            f"decrypt_message: Encrypted message preview: {encrypted_message[:100]}..."
+        )
+
         if not self.cipher_suite:
+            logger.error("decrypt_message: No cipher suite available")
             return None
 
         try:
-            encrypted_data = base64.urlsafe_b64decode(encrypted_message.encode())
+            # Fernet expects the token as bytes, not base64 decoded
+            logger.debug(
+                "decrypt_message: Decrypting with Fernet (no base64 decode needed)"
+            )
+            padded_message = self.cipher_suite.decrypt(encrypted_message.encode())
+            logger.debug(
+                f"decrypt_message: Decrypted padded message length: {len(padded_message)}"
+            )
 
-            # Use Fernet decryption
-            padded_message = self.cipher_suite.decrypt(encrypted_data)
+            logger.debug("decrypt_message: Attempting to unpad message")
             message_bytes = self._unpad_message(padded_message)
-            if message_bytes:
-                return message_bytes.decode("utf-8")
+            if (
+                message_bytes is not None
+            ):  # Check for None explicitly since empty bytes are valid
+                result = message_bytes.decode("utf-8")
+                logger.debug(
+                    f"decrypt_message: Successfully unpadded and decoded: {repr(result[:50])}..."
+                )
+                return result
             else:
                 # Legacy format without padding
-                return padded_message.decode("utf-8")
+                logger.debug("decrypt_message: Unpadding failed, trying legacy format")
+                result = padded_message.decode("utf-8")
+                logger.debug(
+                    f"decrypt_message: Legacy format successful: {repr(result[:50])}..."
+                )
+                return result
 
-        except:
+        except Exception as e:
+            logger.error(f"decrypt_message: Decryption failed: {str(e)}", exc_info=True)
             return None
 
     def generate_dummy_message(self):
         """Generate dummy traffic for traffic analysis protection"""
+        logger.debug("generate_dummy_message: Creating dummy traffic")
         dummy_content = secrets.token_hex(secrets.randbelow(100) + 50)
-        return self.encrypt_message(f"DUMMY:{dummy_content}")
+        result = self.encrypt_message(f"DUMMY:{dummy_content}")
+        logger.debug(
+            f"generate_dummy_message: Generated dummy message, length: {len(result) if result else 0}"
+        )
+        return result
 
     def is_dummy_message(self, decrypted_message):
         """Check if message is dummy traffic"""
-        return decrypted_message and decrypted_message.startswith("DUMMY:")
+        is_dummy = decrypted_message and decrypted_message.startswith("DUMMY:")
+        if is_dummy:
+            logger.debug("is_dummy_message: Message identified as dummy traffic")
+        return is_dummy
 
     def cleanup(self):
         """Securely clean up sensitive data"""
@@ -519,27 +640,61 @@ class AnonymousServer:
         """Start dummy traffic generation to obscure real traffic patterns"""
 
         def generate_dummy_traffic():
+            logger.info(
+                "generate_dummy_traffic: Starting dummy traffic generation thread"
+            )
             while self.running:
                 try:
-                    time.sleep(
-                        DUMMY_TRAFFIC_INTERVAL + secrets.randbelow(30)
+                    sleep_time = DUMMY_TRAFFIC_INTERVAL + secrets.randbelow(
+                        30
                     )  # 30-60s intervals
+                    logger.debug(
+                        f"generate_dummy_traffic: Sleeping for {sleep_time} seconds"
+                    )
+                    time.sleep(sleep_time)
                     if self.running and len(self.clients) > 0:
+                        logger.debug(
+                            f"generate_dummy_traffic: Generating dummy message for {len(self.clients)} clients"
+                        )
                         dummy_msg = self.messenger.generate_dummy_message()
                         if dummy_msg:
                             # Send to all clients
+                            sent_count = 0
                             for client in self.clients[
                                 :
                             ]:  # Copy list to avoid modification during iteration
                                 try:
                                     client.send(dummy_msg.encode())
+                                    sent_count += 1
+                                    logger.debug(
+                                        "generate_dummy_traffic: Sent dummy message to client"
+                                    )
                                 except:
                                     # Remove failed client
                                     if client in self.clients:
                                         self.clients.remove(client)
                                         client.close()
-                except:
+                                        logger.warning(
+                                            "generate_dummy_traffic: Removed failed client"
+                                        )
+                            logger.info(
+                                f"generate_dummy_traffic: Sent dummy message to {sent_count} clients"
+                            )
+                        else:
+                            logger.error(
+                                "generate_dummy_traffic: Failed to generate dummy message"
+                            )
+                    else:
+                        logger.debug(
+                            "generate_dummy_traffic: No clients connected, skipping dummy traffic"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"generate_dummy_traffic: Error in dummy traffic generation: {str(e)}",
+                        exc_info=True,
+                    )
                     break
+            logger.info("generate_dummy_traffic: Dummy traffic generation thread ended")
 
         if self.running:
             self.dummy_traffic_timer = threading.Thread(target=generate_dummy_traffic)
@@ -548,32 +703,70 @@ class AnonymousServer:
 
     def handle_client(self, client_socket):
         """Handle individual client connection"""
+        client_addr = (
+            client_socket.getpeername()
+            if hasattr(client_socket, "getpeername")
+            else "unknown"
+        )
+        logger.info(f"handle_client: New client connected from {client_addr}")
         self.clients.append(client_socket)
 
         try:
             while self.running:
+                logger.debug(
+                    f"handle_client: Waiting for data from client {client_addr}"
+                )
                 data = client_socket.recv(1024)
                 if not data:
+                    logger.info(
+                        f"handle_client: Client {client_addr} disconnected (no data)"
+                    )
                     break
+
+                logger.debug(
+                    f"handle_client: Received {len(data)} bytes from client {client_addr}"
+                )
+                logger.debug(f"handle_client: Data preview: {data[:100]}...")
 
                 # Forward encrypted message to all other clients
                 # No need to decrypt since all clients share the same key
+                forwarded_count = 0
                 for client in self.clients:
                     if client != client_socket:
                         try:
+                            logger.debug(f"handle_client: Forwarding message to client")
                             client.send(data)
-                        except:
+                            forwarded_count += 1
+                            logger.debug(
+                                f"handle_client: Successfully forwarded to client"
+                            )
+                        except Exception as send_error:
+                            logger.error(
+                                f"handle_client: Failed to forward to client: {str(send_error)}"
+                            )
                             # Remove failed client
                             if client in self.clients:
                                 self.clients.remove(client)
                                 client.close()
+                                logger.info(f"handle_client: Removed failed client")
+
+                logger.info(
+                    f"handle_client: Forwarded message to {forwarded_count} clients"
+                )
 
         except Exception as e:
-            pass
+            logger.error(
+                f"handle_client: Error handling client {client_addr}: {str(e)}",
+                exc_info=True,
+            )
         finally:
             if client_socket in self.clients:
                 self.clients.remove(client_socket)
+                logger.info(
+                    f"handle_client: Removed client {client_addr} from clients list"
+                )
             client_socket.close()
+            logger.info(f"handle_client: Closed connection to client {client_addr}")
 
     def stop(self):
         """Stop the server"""
@@ -595,24 +788,35 @@ class AnonymousClient:
 
     def connect(self, connection_string):
         """Connect to server using connection string"""
+        logger.info(
+            f"connect: Starting connection with string: {connection_string[:50]}..."
+        )
+
         try:
             # Parse connection string
             connection_string = connection_string.strip()
             parts = connection_string.split(":")
             if len(parts) != 2:
                 console.print("[red]Invalid connection string format[/red]")
+                logger.error("connect: Invalid connection string format")
                 return False
 
             onion_address = parts[0].strip()
             encryption_key = parts[1].strip()
+            logger.info(f"connect: Parsed onion address: {onion_address}")
+            logger.debug(
+                f"connect: Parsed encryption key length: {len(encryption_key)}"
+            )
 
             console.print("[yellow]Setting up encryption...[/yellow]")
             # Set encryption key
             if not self.messenger.set_key(encryption_key):
                 console.print("[red]Failed to set encryption key[/red]")
+                logger.error("connect: Failed to set encryption key")
                 return False
 
             console.print("[yellow]Connecting to Tor network...[/yellow]")
+            logger.info("connect: Setting up Tor connection")
 
             # Create socket with SOCKS proxy
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -625,6 +829,7 @@ class AnonymousClient:
                 console.print(
                     "[red]PySocks not installed. Install with: pip install PySocks[/red]"
                 )
+                logger.error("connect: PySocks not installed")
                 return False
 
             # Try to find working SOCKS port
@@ -632,6 +837,7 @@ class AnonymousClient:
             working_port = None
 
             console.print("[yellow]Looking for Tor SOCKS proxy...[/yellow]")
+            logger.debug("connect: Searching for working SOCKS port")
             for port in socks_ports:
                 try:
                     # Test the SOCKS proxy by connecting to it
@@ -643,14 +849,17 @@ class AnonymousClient:
                     console.print(
                         f"[green]Found Tor SOCKS proxy on port {port}[/green]"
                     )
+                    logger.info(f"connect: Found working SOCKS port: {port}")
                     break
                 except:
+                    logger.debug(f"connect: Port {port} not available")
                     continue
 
             if not working_port:
                 console.print(
                     "[red]No Tor SOCKS proxy found. Make sure Tor is running.[/red]"
                 )
+                logger.error("connect: No working SOCKS proxy found")
                 return False
 
             self.socks_port = working_port
@@ -662,40 +871,59 @@ class AnonymousClient:
             retry_delay = 10
 
             console.print(f"[yellow]Connecting to {onion_address}...[/yellow]")
+            logger.info(f"connect: Attempting to connect to {onion_address}")
             for attempt in range(max_retries):
                 try:
                     if attempt > 0:
                         console.print(
                             f"[yellow]Retry attempt {attempt + 1}/{max_retries}...[/yellow]"
                         )
+                        logger.info(f"connect: Retry attempt {attempt + 1}")
                         time.sleep(retry_delay)
 
                     self.socket = socks.socksocket()
                     self.socket.settimeout(45)
+                    logger.debug(
+                        f"connect: Attempting connection to {onion_address}:8080"
+                    )
                     self.socket.connect((onion_address, 8080))
                     console.print("[green]Connected successfully![/green]")
+                    logger.info("connect: Successfully connected to server")
                     break
 
                 except socket.timeout:
                     console.print(
                         f"[red]Connection timeout on attempt {attempt + 1}[/red]"
                     )
-                    if self.socket:
-                        self.socket.close()
-                    if attempt == max_retries - 1:
-                        console.print("[red]Failed to connect after all retries[/red]")
-                        return False
-                except Exception as conn_err:
-                    console.print(
-                        f"[red]Connection error on attempt {attempt + 1}: {str(conn_err)}[/red]"
+                    logger.warning(
+                        f"connect: Connection timeout on attempt {attempt + 1}"
                     )
                     if self.socket:
                         self.socket.close()
                     if attempt == max_retries - 1:
                         console.print("[red]Failed to connect after all retries[/red]")
+                        logger.error(
+                            "connect: Failed to connect after all retries (timeout)"
+                        )
+                        return False
+                except Exception as conn_err:
+                    console.print(
+                        f"[red]Connection error on attempt {attempt + 1}: {str(conn_err)}[/red]"
+                    )
+                    logger.error(
+                        f"connect: Connection error on attempt {attempt + 1}: {str(conn_err)}"
+                    )
+                    if self.socket:
+                        self.socket.close()
+                    if attempt == max_retries - 1:
+                        console.print("[red]Failed to connect after all retries[/red]")
+                        logger.error(
+                            "connect: Failed to connect after all retries (error)"
+                        )
                         return False
 
             self.connected = True
+            logger.info("connect: Connection established, starting receive thread")
 
             # Start receiving messages
             receive_thread = threading.Thread(target=self.receive_messages)
@@ -706,44 +934,99 @@ class AnonymousClient:
 
         except Exception as e:
             console.print(f"[red]Connection failed: {str(e)}[/red]")
+            logger.error(f"connect: Connection failed: {str(e)}", exc_info=True)
             return False
 
     def receive_messages(self):
         """Receive and display messages"""
+        logger.info("receive_messages: Starting message reception thread")
         while self.connected:
             try:
+                logger.debug("receive_messages: Waiting for data from server")
                 data = self.socket.recv(1024)
                 if not data:
+                    logger.warning(
+                        "receive_messages: No data received, connection may be closed"
+                    )
                     break
 
+                logger.debug(
+                    f"receive_messages: Received {len(data)} bytes from server"
+                )
+                logger.debug(f"receive_messages: Raw data preview: {data[:100]}...")
+
                 encrypted_msg = data.decode()
+                logger.debug(
+                    f"receive_messages: Decoded encrypted message length: {len(encrypted_msg)}"
+                )
+
+                logger.debug("receive_messages: Attempting to decrypt message")
                 decrypted_msg = self.messenger.decrypt_message(encrypted_msg)
 
-                if decrypted_msg and not self.messenger.is_dummy_message(decrypted_msg):
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    console.print(
-                        f"[dim]{timestamp}[/dim] [blue]>[/blue] {decrypted_msg}"
+                if decrypted_msg:
+                    logger.debug(
+                        f"receive_messages: Successfully decrypted message: {repr(decrypted_msg[:50])}..."
                     )
+                    if not self.messenger.is_dummy_message(decrypted_msg):
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        console.print(
+                            f"[dim]{timestamp}[/dim] [blue]>[/blue] {decrypted_msg}"
+                        )
+                        logger.info(f"receive_messages: Displayed message to user")
+                    else:
+                        logger.debug(
+                            "receive_messages: Received dummy message, not displaying"
+                        )
+                else:
+                    logger.error("receive_messages: Failed to decrypt message")
 
             except Exception as e:
+                logger.error(
+                    f"receive_messages: Error receiving message: {str(e)}",
+                    exc_info=True,
+                )
                 # Only break on socket errors, not decryption errors
                 if self.connected:
                     continue
                 break
 
+        logger.info("receive_messages: Message reception thread ended")
+
     def send_message(self, message):
         """Send encrypted message"""
+        logger.debug(
+            f"send_message: Attempting to send message: {repr(message[:50])}..."
+        )
+
         if not self.connected:
+            logger.error("send_message: Not connected to server")
             return False
 
         try:
+            logger.debug("send_message: Encrypting message")
             encrypted_msg = self.messenger.encrypt_message(message)
             if encrypted_msg:
+                logger.debug(
+                    f"send_message: Successfully encrypted message, length: {len(encrypted_msg)}"
+                )
+                logger.debug(
+                    f"send_message: Encrypted message preview: {encrypted_msg[:100]}..."
+                )
+
+                logger.debug("send_message: Sending encrypted message to server")
                 self.socket.send(encrypted_msg.encode())
+                logger.info(f"send_message: Successfully sent message to server")
+
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 console.print(f"[dim]{timestamp}[/dim] [cyan]You:[/cyan] {message}")
                 return True
+            else:
+                logger.error("send_message: Failed to encrypt message")
+                return False
         except Exception as e:
+            logger.error(
+                f"send_message: Error sending message: {str(e)}", exc_info=True
+            )
             # Connection lost
             self.connected = False
             console.print(f"[red]Connection lost[/red]")
