@@ -2,6 +2,208 @@
 
 A secure, anonymous messaging application that uses Tor hidden services and end-to-end encryption to provide private communication channels.
 
+## Video Showcase
+
+[![Anonymous Terminal Messenger Demo](https://img.shields.io/badge/▶️-Watch%20Demo-red?style=for-the-badge&logo=youtube)](https://your-video-link-here.com)
+
+_Click above to watch a complete demonstration of the anonymous messenger in action, including server setup, client connections, and security testing._
+
+## Technical Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           ANONYMOUS MESSAGING SYSTEM                                │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                SERVER SIDE                                          │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────────────────┐ │
+│  │   Python App    │    │   Tor Process    │    │      Hidden Service         │ │
+│  │  (Server Mode)  │    │                  │    │   abc123def456.onion       │ │
+│  │                 │    │  ┌─────────────┐ │    │                             │ │
+│  │ • TorManager    │◄──►│  │ Hidden Svc  │ │◄──►│  • Generated .onion addr    │ │
+│  │ • SecureMsg     │    │  │ Controller  │ │    │  • Private key stored       │ │
+│  │ • AnonymousServ │    │  └─────────────┘ │    │  • Port mapping: 80→8080    │ │
+│  │                 │    │                  │    │                             │ │
+│  │ Listens on:     │    │  SOCKS: 9050     │    └─────────────────────────────────┘ │
+│  │ localhost:8080  │    │  Control: 9051   │                                       │
+│  └─────────────────┘    └──────────────────┘                                       │
+│           │                       │                                                │
+│           │              ┌────────▼────────┐                                       │
+│           │              │  Tor Network    │                                       │
+│           │              │                 │                                       │
+│           │              │ ┌─────────────┐ │                                       │
+│           │              │ │Entry Relay  │ │                                       │
+│           │              │ └─────┬───────┘ │                                       │
+│           │              │       │         │                                       │
+│           │              │ ┌─────▼───────┐ │                                       │
+│           │              │ │Middle Relay │ │                                       │
+│           │              │ └─────┬───────┘ │                                       │
+│           │              │       │         │                                       │
+│           │              │ ┌─────▼───────┐ │                                       │
+│           │              │ │Exit/Rendez. │ │                                       │
+│           │              │ │   Point     │ │                                       │
+│           │              │ └─────────────┘ │                                       │
+│           │              └─────────────────┘                                       │
+│           │                       │                                                │
+└───────────┼───────────────────────┼────────────────────────────────────────────────┘
+            │                       │
+            │              ┌────────▼────────┐
+            │              │  Tor Network    │
+            │              │   (3-hop path)  │
+            │              └────────┬────────┘
+            │                       │
+┌───────────┼───────────────────────┼────────────────────────────────────────────────┐
+│           │                       │                            CLIENT SIDE         │
+├───────────┼───────────────────────┼────────────────────────────────────────────────┤
+│           │                       │                                                │
+│  ┌────────▼────────┐    ┌────────▼────────┐    ┌─────────────────────────────────┐ │
+│  │   Python App    │    │   Tor Process   │    │      Connection String         │ │
+│  │  (Client Mode)  │    │   (SOCKS Proxy) │    │                                 │ │
+│  │                 │    │                 │    │ abc123def456.onion:             │ │
+│  │ • TorManager    │◄──►│  SOCKS: 9050    │    │ base64_encryption_key_here      │ │
+│  │ • SecureMsg     │    │  (or 9051-9054) │    │                                 │ │
+│  │ • AnonymousClnt │    │                 │    │ • Onion address for connection  │ │
+│  │                 │    │ Routes all      │    │ • Fernet encryption key         │ │
+│  │ Connects via:   │    │ traffic through │    │ • Shared out-of-band securely   │ │
+│  │ SOCKS proxy     │    │ Tor network     │    │                                 │ │
+│  └─────────────────┘    └─────────────────┘    └─────────────────────────────────┘ │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              MESSAGE FLOW                                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│ Client A                    Tor Network                    Server                   │
+│    │                           │                             │                     │
+│    │ 1. Encrypt message        │                             │                     │
+│    │    with Fernet key        │                             │                     │
+│    │                           │                             │                     │
+│    │ 2. Add padding to         │                             │                     │
+│    │    512B/1KB/2KB/4KB       │                             │                     │
+│    │                           │                             │                     │
+│    │ 3. Send via SOCKS         │                             │                     │
+│    │    proxy to Tor           │                             │                     │
+│    │                           │                             │                     │
+│    ├──────────────────────────►│ 4. Route through 3 hops    │                     │
+│    │                           │    (Entry→Middle→Exit)      │                     │
+│    │                           │                             │                     │
+│    │                           ├────────────────────────────►│ 5. Deliver to       │
+│    │                           │                             │    hidden service   │
+│    │                           │                             │                     │
+│    │                           │                             │ 6. Relay encrypted  │
+│    │                           │                             │    message to all   │
+│    │                           │                             │    connected clients│
+│    │                           │                             │                     │
+│    │                           │ 7. Route back through      ◄┤                     │
+│    │                           │    different 3-hop path    │                     │
+│    │                           │                             │                     │
+│    ◄───────────────────────────┤ 8. Deliver to Client B     │                     │
+│    │                           │    via SOCKS proxy         │                     │
+│    │                           │                             │                     │
+│    │ 9. Decrypt with           │                             │                     │
+│    │    shared Fernet key      │                             │                     │
+│    │                           │                             │                     │
+│    │ 10. Remove padding &      │                             │                     │
+│    │     display message       │                             │                     │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           SECURITY LAYERS                                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│ Layer 1: Network Anonymity                                                          │
+│ ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ • Tor Hidden Services (.onion addresses)                                       │ │
+│ │ • 3-hop onion routing (Entry → Middle → Exit/Rendezvous)                       │ │
+│ │ • No IP address exposure for server or clients                                 │ │
+│ │ • Circuit refresh every 5 minutes                                              │ │
+│ │ • Traffic routed through different paths                                       │ │
+│ └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+│ Layer 2: Message Encryption                                                         │
+│ ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ • Fernet symmetric encryption (AES-128 + HMAC-SHA256)                          │ │
+│ │ • Cryptographically secure key generation                                      │ │
+│ │ • Base64-encoded keys for sharing                                               │ │
+│ │ • Server never sees plaintext (zero-knowledge relay)                           │ │
+│ └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+│ Layer 3: Traffic Analysis Protection                                                │
+│ ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ • Message padding to fixed sizes (512B, 1KB, 2KB, 4KB)                        │ │
+│ │ • Random timing delays (0.5-3 seconds between messages)                        │ │
+│ │ • Dummy traffic generation (every 30-60 seconds)                               │ │
+│ │ • No message size or timing correlation possible                               │ │
+│ └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+│ Layer 4: Memory & Data Protection                                                   │
+│ ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ • Secure memory zeroing (3-pass overwrite)                                     │ │
+│ │ • Memory locking (prevents swap to disk)                                       │ │
+│ │ • Temporary file cleanup                                                        │ │
+│ │ • All logging disabled                                                          │ │
+│ └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        ONION SERVICE CREATION PROCESS                               │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│ Step 1: Key Generation                                                              │
+│ ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ • Tor generates ED25519 private/public key pair                                 │ │
+│ │ • Public key hashed to create .onion address                                   │ │
+│ │ • Format: [16-char-hash].onion (v2) or [56-char-hash].onion (v3)              │ │
+│ │ • Private key stored securely in Tor data directory                            │ │
+│ └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+│ Step 2: Service Registration                                                        │
+│ ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ • Tor creates hidden service descriptor                                         │ │
+│ │ • Descriptor contains: public key, service info, introduction points           │ │
+│ │ • Published to distributed hash table (DHT) in Tor network                     │ │
+│ │ • Rendezvous points selected for client connections                             │ │
+│ └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+│ Step 3: Connection Establishment                                                    │
+│ ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ • Client looks up .onion address in Tor DHT                                     │ │
+│ │ • Retrieves service descriptor and introduction points                          │ │
+│ │ • Establishes circuit to rendezvous point                                      │ │
+│ │ • Server and client meet at rendezvous point                                   │ │
+│ │ • Direct encrypted tunnel established (no exit node needed)                    │ │
+│ └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           TRAFFIC CHARACTERISTICS                                    │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│ Protocol Stack:                                                                     │
+│ ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ Application Layer:  Encrypted Messages (Fernet)                                │ │
+│ │ Transport Layer:    TCP (reliable delivery)                                     │ │
+│ │ Network Layer:      Tor Onion Routing (3 layers of encryption)                 │ │
+│ │ Physical Layer:     Standard Internet (but anonymized)                         │ │
+│ └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+│ Traffic Flow:                                                                       │
+│ • NOT HTTPS: Direct TCP connection through Tor                                     │
+│ • Each Tor hop adds/removes one layer of encryption                                │
+│ • Final connection to hidden service is direct (no exit node)                     │
+│ • All traffic appears as Tor traffic to ISP/network observers                     │
+│ • Message content encrypted separately with Fernet (double encryption)            │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
 ## Research Background
 
 This implementation is based on research documented at: [Research Document - Anonymous Messaging Systems](https://nbaburov.notion.site/Research-Document-1cf258cb140c8007bca7fcdd6543120e?pvs=74)
