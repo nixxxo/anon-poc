@@ -4,9 +4,8 @@ A secure, anonymous messaging application that uses Tor hidden services and end-
 
 ## Video Showcase
 
-![Demo](security_plots/use_video.mov)
+https://github.com/user-attachments/assets/641436fe-7abd-4170-9aea-6da263156596
 
-_Click above to watch a complete demonstration of the anonymous messenger in action, including server setup, client connections, and security testing._
 
 ## Technical Architecture Diagram
 
