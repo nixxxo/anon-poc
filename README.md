@@ -1039,4 +1039,4 @@ Security improvements and bug reports are welcome. Please follow responsible dis
 
 ## License
 
-MIT License - See LICENSE file for details
+MIT License - See [LICENSE](LICENSE) file for details
