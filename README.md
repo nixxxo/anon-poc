@@ -4,7 +4,7 @@ A secure, anonymous messaging application that uses Tor hidden services and end-
 
 ## Video Showcase
 
-[![Anonymous Terminal Messenger Demo](https://img.shields.io/badge/▶️-Watch%20Demo-red?style=for-the-badge&logo=youtube)](https://your-video-link-here.com)
+![Demo](security_plots/use_video.mov)
 
 _Click above to watch a complete demonstration of the anonymous messenger in action, including server setup, client connections, and security testing._
 
